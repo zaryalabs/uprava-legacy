@@ -583,6 +583,7 @@ async fn node_provider_access_issues_ephemeral_codex_lease_without_persisting_to
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "inspect available tools".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await
@@ -808,6 +809,38 @@ async fn concurrent_mcp_lease_rotation_serializes_on_sqlite() {
     let _ = std::fs::remove_dir_all(workspace_path);
     drop(state);
     remove_sqlite_file_set(&database_path);
+}
+
+#[tokio::test]
+async fn managed_mcp_lease_is_reused_until_the_refresh_window() {
+    let state = test_state().await;
+    let (_node_id, detail, workspace_path) = create_test_session(&state).await;
+    let actor = ActorRef::Provider {
+        provider: "codex".to_owned(),
+    };
+
+    let (first_token, first_claims) =
+        issue_managed_mcp_access_lease(&state, &detail.session.session_thread_id, actor.clone())
+            .await
+            .expect("first Managed lease issues");
+    let (second_token, second_claims) =
+        issue_managed_mcp_access_lease(&state, &detail.session.session_thread_id, actor)
+            .await
+            .expect("active Managed lease reuses");
+
+    assert_eq!(second_token, first_token);
+    assert_eq!(second_claims.lease_id, first_claims.lease_id);
+    assert!(first_claims.expires_at - first_claims.issued_at >= chrono::Duration::hours(24));
+    let active_leases: i64 = sqlx::query_scalar(
+        "select count(*) from mcp_access_leases where session_thread_id = ?1 and revoked_at is null",
+    )
+    .bind(detail.session.session_thread_id.as_str())
+    .fetch_one(&state.pool)
+    .await
+    .expect("active Managed leases count loads");
+    assert_eq!(active_leases, 1);
+
+    let _ = std::fs::remove_dir_all(workspace_path);
 }
 
 #[tokio::test]

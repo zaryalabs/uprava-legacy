@@ -599,7 +599,7 @@ Node report не может воскресить superseded attempt, а отсу
 process даёт explicit provider-resumable projection. Web baseline `0.2.24`
 добавляет явный profile/policy start contract, semantic activity and interaction
 cards, persistent runtime diagnostics и capability-aware lifecycle. Closure
-baseline `0.2.25` переводит новые Agent sessions на Managed default при
+baseline `0.2.26` переводит новые Agent sessions на Managed default при
 подтверждённых Node capabilities; отсутствующий profile на incapable Node
 получает typed rejection без Exec fallback. Stored profiles не мигрируют,
 internal Jobs остаются на явном Exec compatibility path, а Task Run contract

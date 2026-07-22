@@ -42,6 +42,8 @@ pub enum CommandPayload {
     SendTurn {
         content: String,
         turn_id: TurnId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collaboration_mode: Option<String>,
     },
     ResolveApproval {
         approval_id: ApprovalId,
@@ -61,6 +63,8 @@ pub enum CommandPayload {
     StopRuntime {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runtime_attempt_id: Option<RuntimeAttemptId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     ValidateWorkspace {
         display_name: String,

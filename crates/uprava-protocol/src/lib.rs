@@ -69,6 +69,7 @@ mod tests {
         let payload = CommandPayload::SendTurn {
             content: "hello".to_owned(),
             turn_id: TurnId::from("turn-1"),
+            collaboration_mode: None,
         };
 
         assert!(payload.matches_kind(CommandKind::SendTurn));
@@ -116,6 +117,7 @@ mod tests {
             payload: CommandPayload::SendTurn {
                 content: "fixture".to_owned(),
                 turn_id: TurnId::from("turn-1"),
+                collaboration_mode: None,
             },
         };
 

@@ -26,12 +26,77 @@ fn command_execution_key_prefers_runtime_then_placement() {
     );
 }
 
+#[test]
+fn interrupt_and_stop_never_wait_on_the_active_runtime_execution_lock() {
+    let send = command_fixture("command-send", CommandKind::SendTurn);
+    let interrupt = command_fixture("command-interrupt", CommandKind::InterruptRuntime);
+    let stop = command_fixture("command-stop", CommandKind::StopRuntime);
+
+    assert_eq!(command_execution_key(&send), "runtime:runtime-1");
+    assert_eq!(
+        command_execution_key(&interrupt),
+        "priority-command:command-interrupt"
+    );
+    assert_eq!(
+        command_execution_key(&stop),
+        "priority-command:command-stop"
+    );
+}
+
+#[test]
+fn priority_runtime_events_rebase_after_the_active_command_finishes() {
+    let command = command_fixture("command-interrupt", CommandKind::InterruptRuntime);
+    let runtime_id = RuntimeSessionId::from("runtime-1");
+    let mut local_state = NodeLocalState::default();
+    let first = event_for_command(
+        "codex",
+        &command,
+        &mut local_state.runtime_seqs,
+        runtime_id.clone(),
+        Some(TurnId::from("turn-1")),
+        EventKind::TurnInterrupted,
+        serde_json::json!({}),
+    );
+    let second = event_for_command(
+        "codex",
+        &command,
+        &mut local_state.runtime_seqs,
+        runtime_id,
+        None,
+        EventKind::RuntimeReady,
+        serde_json::json!({}),
+    );
+    local_state.event_outbox = vec![first.clone(), second.clone()];
+    let mut events = vec![first, second];
+    let current = NodeLocalState {
+        runtime_seqs: HashMap::from([("runtime-1".to_owned(), 41)]),
+        ..NodeLocalState::default()
+    };
+
+    rebase_priority_runtime_events(&mut local_state, &mut events, &current, &command);
+
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        [42, 43]
+    );
+    assert_eq!(
+        local_state
+            .event_outbox
+            .iter()
+            .map(|event| event.seq)
+            .collect::<Vec<_>>(),
+        [42, 43]
+    );
+    assert_eq!(local_state.runtime_seqs.get("runtime-1"), Some(&43));
+}
+
 #[tokio::test]
 async fn command_dispatch_rejects_payload_kind_mismatch_before_execution() {
     let config = config_fixture();
     let mut command = command_fixture("command-mismatch", CommandKind::SendTurn);
     command.payload = CommandPayload::StopRuntime {
         runtime_attempt_id: None,
+        reason: None,
     };
     let mut local_state = NodeLocalState::default();
 

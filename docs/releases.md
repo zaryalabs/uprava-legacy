@@ -2,7 +2,7 @@
 
 Статус: `active`
 
-Current release baseline: `0.2.25`.
+Current release baseline: `0.2.26`.
 
 Этот ledger фиксирует implementation baselines. Он не заменяет
 [`feature-queue.md`](product/feature-queue.md), где остается ранжированная очередь
@@ -46,14 +46,15 @@ future work.
 | `0.2.22` | 2026-07-22 | shipped | Managed Agent Work Loop stage 2: Node-owned Codex app-server supervisor, live semantic stream, interactions, interrupt/stop, resume descriptors и restart reconciliation |
 | `0.2.23` | 2026-07-22 | shipped | Managed Agent Work Loop stage 3: Core policy preview/admission, durable interaction state machine, ordered projection, actual-state reconnect, recovery audit и metrics |
 | `0.2.24` | 2026-07-22 | shipped | Managed Agent Work Loop stage 4: explicit profile/policy start UX, semantic timeline, typed interaction cards, runtime diagnostics и capability-aware lifecycle |
-| `0.2.25` | 2026-07-22 | current | Managed Agent Work Loop stage 5: recovery/acceptance gate, capability-aware Managed default, explicit compatibility isolation и provider environment allowlist |
+| `0.2.25` | 2026-07-22 | shipped | Managed Agent Work Loop stage 5: recovery/acceptance gate, capability-aware Managed default, explicit compatibility isolation и provider environment allowlist |
+| `0.2.26` | 2026-07-22 | current | Managed Agent Work Loop deployment hardening: renewable process MCP lease, canonical workspace enforcement, bounded interrupt/stop, real idle teardown, provider version pinning и complete host acceptance |
 
 ## Current Baseline
 
-`0.2.25` включает baseline `0.2.24`, protocol-v2 baseline `0.2.0`, завершённое Zarya 0.1 Web UI/UX
+`0.2.26` включает baseline `0.2.25`, protocol-v2 baseline `0.2.0`, завершённое Zarya 0.1 Web UI/UX
 alignment и clean-bootstrap four-phase delivery path. Текущая реализация включает
 первый working distributed
-control panel, двадцать пять implementation slices после `0.1.0`, unified audit
+control panel, двадцать шесть implementation slices после `0.1.0`, unified audit
 hardening slice и workspace
 renderer/PTY terminal layer, а также первый deployable self-hosted release path:
 
@@ -69,6 +70,25 @@ renderer/PTY terminal layer, а также первый deployable self-hosted r
 - lifecycle controls следуют projected capabilities: managed-only Interrupt не
   показывается для Exec compatibility, Detach не останавливает provider, Stop
   сохраняет session history, а Resume показывает policy/recovery context;
+- Managed process MCP credential переиспользуется до refresh window и
+  ротируется через replacement app-server + provider-native resume; первый
+  turn больше не отзывает credential живого процесса; одноразовое имя
+  secret-env и отключённый `shell_snapshot` защищают от cached credentials,
+  а встроенный server не дублирует Core-owned tool approvals;
+- Node канонизирует Managed workspace и immutable policy root перед spawn;
+  interrupt доступен параллельно active socket loop, имеет bounded provider
+  confirmation и TERM/KILL escalation; неизвестный provider callback даёт
+  typed failure и teardown вместо бесконечного зависания;
+- idle expiry записывает system StopRuntime, завершает Node process, отзывает
+  lease и переводит pending interactions в expired; provider version из Node
+  capability закрепляется в effective policy; SIGINT/SIGTERM наблюдаются на
+  всём supervisor loop, поэтому service shutdown не оставляет app-server orphan;
+- host acceptance автоматически проверяет approve, deny, user input,
+  interrupt, MCP, stop/resume, reload и explicit Exec compatibility;
+- Managed composer и Send Turn API имеют explicit `default | plan` mode; Plan
+  прокидывает effective provider model в app-server и включает typed
+  user-input interaction, каждый следующий turn явно восстанавливает Default,
+  а Exec compatibility получает typed rejection;
 
 - Core рассчитывает policy preview до start, атомарно сохраняет выбранный
   profile, immutable policy/hash, Start command и audit. Explicit Exec

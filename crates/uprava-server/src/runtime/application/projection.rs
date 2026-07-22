@@ -244,7 +244,8 @@ pub(crate) async fn expire_idle_runtimes(state: &AppState) -> Result<(), AppErro
     let cutoff = now - chrono::Duration::seconds(state.config.runtime_expiry_seconds);
     let rows = sqlx::query(
         r#"
-        select rs.runtime_session_id, rs.session_thread_id, pp.node_id
+        select rs.runtime_session_id, rs.session_thread_id, pp.node_id,
+               pp.project_placement_id
         from runtime_sessions rs
         join session_threads st on st.session_thread_id = rs.session_thread_id
         join project_placements pp on pp.project_placement_id = st.project_placement_id
@@ -262,6 +263,49 @@ pub(crate) async fn expire_idle_runtimes(state: &AppState) -> Result<(), AppErro
         let session_thread_id =
             SessionThreadId::from(row.try_get::<String, _>("session_thread_id")?);
         let node_id = NodeId::from(row.try_get::<String, _>("node_id")?);
+        let project_placement_id =
+            ProjectPlacementId::from(row.try_get::<String, _>("project_placement_id")?);
+        let stop_already_recorded: bool = sqlx::query_scalar(
+            r#"
+            select exists(
+                select 1 from commands
+                where runtime_session_id = ?1
+                  and kind = 'StopRuntime'
+                  and state not in ('completed', 'failed', 'expired')
+            )
+            "#,
+        )
+        .bind(runtime_session_id.as_str())
+        .fetch_one(&state.pool)
+        .await?;
+        if !stop_already_recorded {
+            record_and_dispatch_command(
+                state,
+                CommandEnvelope {
+                    command_id: CommandId::new(),
+                    kind: CommandKind::StopRuntime,
+                    target: CommandTarget::SessionRuntime {
+                        node_id: node_id.clone(),
+                        project_placement_id,
+                        session_thread_id: session_thread_id.clone(),
+                        runtime_session_id: runtime_session_id.clone(),
+                    },
+                    actor_ref: ActorRef::System,
+                    source_refs: vec![UpravaRef::Runtime {
+                        runtime_session_id: runtime_session_id.clone(),
+                    }],
+                    cause_refs: vec![],
+                    issued_at: now,
+                    correlation_id: CorrelationId::new(),
+                    payload: CommandPayload::StopRuntime {
+                        runtime_attempt_id: None,
+                        reason: Some("idle_expired".to_owned()),
+                    },
+                },
+            )
+            .await?;
+        }
+        revoke_session_mcp_leases(state, &session_thread_id, "runtime_idle_expired").await?;
         let seq = next_seq(
             state,
             &scope_key(&ScopeRef::Runtime {

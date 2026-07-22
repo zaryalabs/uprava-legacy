@@ -391,12 +391,18 @@ fn codex_mcp_delivery_keeps_lease_out_of_process_arguments_and_debug_output() {
     let token_env = command
         .as_std()
         .get_envs()
-        .find(|(name, _)| name.to_string_lossy() == UPRAVA_MCP_TOKEN_ENV)
+        .find(|(name, _)| {
+            name.to_string_lossy()
+                .starts_with(UPRAVA_MCP_TOKEN_ENV_PREFIX)
+        })
         .and_then(|(_, value)| value)
         .map(|value| value.to_string_lossy().into_owned());
 
     assert!(args.contains("mcp_servers.uprava.url="));
     assert!(args.contains("mcp_servers.uprava.bearer_token_env_var="));
+    assert!(args.contains("mcp_servers.uprava.default_tools_approval_mode=\"approve\""));
+    assert!(args.contains("shell_snapshot"));
+    assert!(args.contains("shell_environment_policy.inherit=all"));
     assert!(!args.contains("lease-secret-value"));
     assert_eq!(token_env.as_deref(), Some("lease-secret-value"));
     assert!(!format!("{access:?}").contains("lease-secret-value"));
@@ -405,8 +411,15 @@ fn codex_mcp_delivery_keeps_lease_out_of_process_arguments_and_debug_output() {
 #[test]
 fn provider_environment_keeps_only_allowlisted_inherited_values() {
     let _lock = env_lock();
-    let _env = EnvGuard::cleared(&["OPENAI_PROJECT", "UPRAVA_SECRET_SENTINEL"]);
+    let _env = EnvGuard::cleared(&[
+        "OPENAI_PROJECT",
+        "SHELL",
+        "CODEX_SHELL",
+        "UPRAVA_SECRET_SENTINEL",
+    ]);
     std::env::set_var("OPENAI_PROJECT", "allowed-project");
+    std::env::set_var("SHELL", "/bin/zsh");
+    std::env::set_var("CODEX_SHELL", "/bin/zsh");
     std::env::set_var("UPRAVA_SECRET_SENTINEL", "must-not-leak");
     let mut command = TokioCommand::new("codex");
 
@@ -425,6 +438,11 @@ fn provider_environment_keeps_only_allowlisted_inherited_values() {
     assert_eq!(
         environment.get("OPENAI_PROJECT"),
         Some(&Some("allowed-project".to_owned()))
+    );
+    assert_eq!(environment.get("SHELL"), Some(&Some("/bin/zsh".to_owned())));
+    assert_eq!(
+        environment.get("CODEX_SHELL"),
+        Some(&Some("/bin/zsh".to_owned()))
     );
     assert!(!environment.contains_key("UPRAVA_SECRET_SENTINEL"));
 }

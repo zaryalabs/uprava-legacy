@@ -23,6 +23,13 @@ pub(crate) fn capabilities(config: &NodeConfig) -> Vec<CapabilitySummary> {
         && config.codex_version.is_some();
     vec![
         CapabilitySummary {
+            key: "provider.codex.version".to_owned(),
+            value: CapabilityValue::Extension {
+                name: "provider_version".to_owned(),
+                value: JsonValue(serde_json::json!(config.codex_version)),
+            },
+        },
+        CapabilitySummary {
             key: "provider.codex".to_owned(),
             value: CapabilityValue::Provider {
                 available: codex_available,

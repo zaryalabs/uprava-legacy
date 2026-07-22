@@ -62,7 +62,7 @@ impl NodeConfig {
             validate_insecure_opensandbox_url(url)?;
         }
         let task_runtime_image = std::env::var("UPRAVA_TASK_RUNTIME_IMAGE")
-            .unwrap_or_else(|_| "uprava/codex-runtime:0.2.25".to_owned());
+            .unwrap_or_else(|_| "uprava/codex-runtime:0.2.26".to_owned());
         if task_runtime_image.trim().is_empty() {
             anyhow::bail!("UPRAVA_TASK_RUNTIME_IMAGE must not be empty");
         }

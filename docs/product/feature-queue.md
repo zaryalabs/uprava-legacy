@@ -40,7 +40,7 @@ dependency, complexity, risk and value. Позиции могут двигать
 
 ## Обзор очереди
 
-Current release baseline: `0.2.25`. Закрытые пункты `0` through `14` и `16`, unified
+Current release baseline: `0.2.26`. Закрытые пункты `0` through `14` и `16`, unified
 audit hardening release и `5a` workspace renderer release соответствуют shipped
 versions, зафиксированным в [`releases.md`](../releases.md). Пункт `6` включает
 workbench alignment, первый стабильный self-hosted deployment path и
@@ -725,6 +725,12 @@ default для новых Agent sessions на capable Node, missing profile бо
 Tasks остаются изолированными, provider process environment ограничен
 allowlist, а real-host acceptance и recovery matrix оформлены отдельным
 [runbook](../runbooks/managed-agent-runtime.md).
+`0.2.26` закрывает post-completion deployment hardening: Managed MCP lease
+сохраняет process continuity и ротируется через provider-native resume,
+workspace повторно канонизируется на Node, interrupt имеет bounded
+TERM/KILL escalation, idle expiry действительно останавливает Node process и
+отзывает lease, а host gate автоматически проверяет approve, deny, input,
+interrupt и MCP.
 
 **Target direction:** Provider-neutral managed runtime contract, richer
 TUI-equivalent interaction, runtime recovery, checkpoints and handoff. Agent

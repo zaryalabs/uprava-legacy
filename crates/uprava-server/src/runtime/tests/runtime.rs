@@ -297,6 +297,7 @@ async fn turn_events_update_durable_turn_state_and_blocked_approval() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "needs approval".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await
@@ -356,6 +357,7 @@ async fn send_turn_rejects_offline_node_without_recording_command() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "hello".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -392,6 +394,7 @@ async fn send_turn_rejects_detached_session_without_recording_command() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "hello".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -423,6 +426,7 @@ async fn send_turn_rejects_runtime_state_without_recording_command() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "hello".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -567,6 +571,7 @@ async fn send_turn_rejects_placement_hard_block_without_recording_command() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "blocked".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -599,6 +604,7 @@ async fn send_turn_rejects_missing_provider_capability_without_recording_command
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "hello".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -1082,6 +1088,15 @@ async fn load_session_detail_expires_idle_runtime_with_durable_event() {
     let (_node_id, detail, workspace_path) = create_test_session(&state).await;
     set_session_runtime_state(&state, &detail, RuntimeSessionState::Ready).await;
     set_session_runtime_last_step(&state, &detail, Utc::now() - chrono::Duration::seconds(2)).await;
+    let (managed_token, _) = issue_managed_mcp_access_lease(
+        &state,
+        &detail.session.session_thread_id,
+        ActorRef::Provider {
+            provider: "codex".to_owned(),
+        },
+    )
+    .await
+    .expect("Managed lease issues before expiry");
 
     let detail = load_session_detail(&state, &detail.session.session_thread_id)
         .await
@@ -1099,6 +1114,29 @@ async fn load_session_detail_expires_idle_runtime_with_durable_event() {
                 .and_then(serde_json::Value::as_str)
                 == Some("runtime.idle_expired")
     }));
+    let stop_command: String = sqlx::query_scalar(
+        "select command_json from commands where runtime_session_id = ?1 and kind = 'StopRuntime'",
+    )
+    .bind(detail.session.runtime.runtime_session_id.as_str())
+    .fetch_one(&state.pool)
+    .await
+    .expect("idle expiry records a Node stop command");
+    let stop_command: CommandEnvelope =
+        serde_json::from_str(&stop_command).expect("stop command decodes");
+    assert!(matches!(
+        stop_command.payload,
+        CommandPayload::StopRuntime {
+            reason: Some(ref reason),
+            ..
+        } if reason == "idle_expired"
+    ));
+    let revoked = validate_mcp_access_lease(&state, &managed_token)
+        .await
+        .expect_err("idle expiry revokes the Managed provider lease");
+    assert_eq!(
+        revoked.code,
+        uprava_protocol::ToolExecutionErrorCode::LeaseRevoked
+    );
 }
 
 #[tokio::test]
@@ -1115,6 +1153,7 @@ async fn send_turn_rejects_idle_expired_runtime_without_recording_command() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "after expiry".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -1129,12 +1168,12 @@ async fn send_turn_rejects_idle_expired_runtime_without_recording_command() {
             ..
         })
     ));
-    assert_eq!(command_count_after, command_count_before);
+    assert_eq!(command_count_after, command_count_before + 1);
     assert_eq!(message_count_after, message_count_before);
 }
 
 #[tokio::test]
-async fn resume_runtime_accepts_idle_expired_runtime() {
+async fn resume_runtime_waits_for_idle_expiry_stop_to_finish() {
     let state = test_state_with_runtime_expiry(1).await;
     let (_node_id, detail, workspace_path) = create_test_session(&state).await;
     set_session_runtime_state(&state, &detail, RuntimeSessionState::Ready).await;
@@ -1154,12 +1193,32 @@ async fn resume_runtime_accepts_idle_expired_runtime() {
     .await
     .expect("provider resume ref stores");
 
+    let pending = resume_runtime(
+        State(state.clone()),
+        Path(detail.session.runtime.runtime_session_id.to_string()),
+    )
+    .await;
+    assert!(matches!(
+        pending,
+        Err(AppError::Conflict {
+            code: "runtime.stop_pending",
+            ..
+        })
+    ));
+    sqlx::query(
+        "update commands set state = 'completed', completed_at = ?1 where runtime_session_id = ?2 and kind = 'StopRuntime'",
+    )
+    .bind(Utc::now())
+    .bind(detail.session.runtime.runtime_session_id.as_str())
+    .execute(&state.pool)
+    .await
+    .expect("idle stop confirmation stores");
     let response = resume_runtime(
         State(state.clone()),
         Path(detail.session.runtime.runtime_session_id.to_string()),
     )
     .await
-    .expect("expired runtime resumes")
+    .expect("expired runtime resumes after stop confirmation")
     .0;
     let command_kind: String =
         sqlx::query_scalar("select kind from commands where command_id = ?1")

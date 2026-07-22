@@ -418,7 +418,7 @@ provider codes:
 This is the accepted V01 Codex protocol after the local CLI spike: exec-mode
 adapter, not the final provider-native managed runtime. Пункт
 [`16 Managed Agent Work Loop`](../product/feature-queue.md#16-managed-agent-work-loop)
-закрыт baseline `0.2.25`: новые Agent sessions используют provider-native
+закрыт baseline `0.2.25` и hardened baseline `0.2.26`: новые Agent sessions используют provider-native
 Managed mode на capable Node. `codex exec/resume` сохранён как явный
 unrestricted compatibility mode; настоящий Interrupt доступен только Managed.
 
@@ -430,9 +430,10 @@ make codex-smoke
 
 This starts a disposable Core on `127.0.0.1:18080`, Web on
 `127.0.0.1:15173`, and a host Node with a temporary git workspace under
-`/private/tmp`. It verifies the Managed API default and safe policy, performs
-two turns around detach/attach and stop/resume, reloads the Web projection, and
-then verifies a separate explicit Exec compatibility turn. Override
+`/private/tmp`. It verifies the Managed API default and safe policy,
+approve/deny/input, interrupt and MCP, performs two turns around detach/attach
+and stop/resume, reloads the Web projection, and then verifies a separate
+explicit Exec compatibility turn. Override
 `CODEX_SMOKE_CORE_PORT`, `CODEX_SMOKE_WEB_PORT`, `CODEX_SMOKE_STATE_DIR`,
 `CODEX_SMOKE_WORKSPACE_PATH`, `CODEX_SMOKE_CODEX_BINARY`,
 `CODEX_SMOKE_TURN_CONTENT`, `CODEX_SMOKE_EXPECTED_ASSISTANT_CONTENT` or
@@ -453,8 +454,9 @@ Runtime-scoped events update `last_runtime_step_at`; healthy runtime events
 such as `runtime.ready` clear degraded runtime/session read-model state.
 Core expires ready, running, blocked or stale runtimes after
 `UPRAVA_RUNTIME_EXPIRY_SECONDS` without runtime activity by recording a
-system-authored `runtime.expired` event. Expired runtimes reject new turns but
-remain resumable when the provider adapter supports resume.
+system-authored `runtime.expired` event and a Node `StopRuntime` command. The
+provider process is terminated, MCP leases are revoked, and resume is accepted
+only after stop confirmation.
 The session SSE endpoint sends persisted historical events first and then keeps
 the connection open for future accepted events through Core's in-process event
 bus. If the stream falls behind the bounded bus, Core emits a `uprava.reload`
@@ -508,7 +510,8 @@ workspace/session flow, warning/degraded states and inspector actions, then
 collect `make dev-logs` output if a defect needs debugging.
 
 `make codex-smoke` starts host Core/Web/Node with a disposable writable
-workspace and runs both Managed default and explicit Exec compatibility paths.
+workspace and runs Managed interactions/MCP/lifecycle plus the explicit Exec
+compatibility path.
 Run it only where Codex CLI is installed and authenticated.
 
 ## Known Limits
@@ -527,7 +530,7 @@ Run it only where Codex CLI is installed and authenticated.
 - Workspace command execution is no-shell and limited to controlled-dev
   allow-list `cargo`, `git`, `make`, `node`, `npm`, `pnpm`, `bun` and `rustc`;
   другие executables отклоняются Node policy.
-- Codex provider adapter is the V01 exec/resume mode with bounded local
-  transcript continuity plus provider-native non-interactive resume when a
-  provider session id is available. Persistent interactive process ownership,
-  streaming output and real interrupt escalation are post-V01 work.
+- Exec compatibility remains the V01 `codex exec/resume` adapter. Managed owns
+  a persistent app-server process per attempt with streaming, typed
+  interactions and bounded interrupt escalation; the two profiles never
+  replace one another silently.

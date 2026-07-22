@@ -965,6 +965,7 @@ export type ProviderQuotaStatus = {
 
 export type SendTurnRequest = {
   content: string;
+  collaboration_mode?: "default" | "plan";
 };
 
 export type CreateScheduledMessageRequest = {

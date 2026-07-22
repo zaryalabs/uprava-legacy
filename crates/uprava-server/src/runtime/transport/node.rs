@@ -486,9 +486,9 @@ pub(crate) async fn node_provider_mcp_access(
             "Provider command is missing a session target",
         )
     })?;
-    let provider: String = sqlx::query_scalar(
+    let (provider, execution_profile): (String, String) = sqlx::query_as(
         r#"
-        select rs.provider
+        select rs.provider, rs.execution_profile
         from runtime_sessions rs
         where rs.session_thread_id = ?1
         order by rs.updated_at desc
@@ -506,6 +506,7 @@ pub(crate) async fn node_provider_mcp_access(
         ));
     }
 
+    let managed_runtime = managed_process_start || execution_profile == "managed";
     let actor_ref = ActorRef::Provider { provider };
     let (access_token, claims) = if command.kind == CommandKind::ResumeRuntime {
         issue_mcp_access_lease_for_resume(
@@ -515,6 +516,8 @@ pub(crate) async fn node_provider_mcp_access(
             &request.command_id,
         )
         .await?
+    } else if managed_runtime {
+        issue_managed_mcp_access_lease(&state, &session_thread_id, actor_ref).await?
     } else {
         issue_mcp_access_lease(&state, &session_thread_id, actor_ref).await?
     };

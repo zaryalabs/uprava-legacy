@@ -167,6 +167,22 @@ pub(crate) fn spawn_command_dispatch_task(
             .lock_for(command_execution_key(&job.command))
             .await;
         let _guard = execution_lock.lock().await;
+        let post_execution_lock = if matches!(
+            job.command.kind,
+            CommandKind::InterruptRuntime | CommandKind::StopRuntime
+        ) {
+            match job.command.target.runtime_session_id() {
+                Some(runtime_id) => Some(
+                    shared
+                        .locks
+                        .lock_for(runtime_cancellation_key(runtime_id))
+                        .await,
+                ),
+                None => None,
+            }
+        } else {
+            None
+        };
         let cancellation_guard = match execution_cancellation_key(&job.command) {
             Some(key) => Some(shared.cancellations.begin(key).await),
             None => None,
@@ -201,6 +217,7 @@ pub(crate) fn spawn_command_dispatch_task(
             managed_supervisor: &shared.managed_supervisor,
             shared_state: &shared.shared_state,
             cancellation: cancellation_receiver,
+            post_execution_lock,
         };
         if let Err(error) =
             handle_command_dispatch(context, job.command, &mut local_state, &baseline).await
@@ -299,6 +316,12 @@ pub(crate) fn cancellation_signal(command: &CommandEnvelope) -> Option<(String, 
 }
 
 pub(crate) fn command_execution_key(command: &CommandEnvelope) -> String {
+    if matches!(
+        command.kind,
+        CommandKind::InterruptRuntime | CommandKind::StopRuntime
+    ) {
+        return format!("priority-command:{}", command.command_id.as_str());
+    }
     if let Some(task_run_id) = command.target.task_run_id() {
         return task_cancellation_key(task_run_id);
     }
@@ -346,6 +369,7 @@ pub(crate) struct CommandDispatchContext<'a> {
     pub(crate) managed_supervisor: &'a ManagedRuntimeSupervisor,
     pub(crate) shared_state: &'a NodeStateStore,
     pub(crate) cancellation: Option<watch::Receiver<bool>>,
+    pub(crate) post_execution_lock: Option<Arc<Mutex<()>>>,
 }
 
 pub(crate) async fn handle_command_dispatch(
@@ -418,13 +442,14 @@ pub(crate) async fn handle_command_dispatch(
         None
     };
 
-    let outcome = prepare_command_dispatch_with_live_socket(
+    let priority_runtime_command = context.post_execution_lock.is_some();
+    let mut outcome = prepare_command_dispatch_with_live_socket(
         context.config,
         local_state,
         &command,
         CommandExecutionContext {
             provider_mcp_access: provider_mcp_access.as_ref(),
-            live_sender: Some(context.sender),
+            live_sender: (!priority_runtime_command).then_some(context.sender),
             terminal_supervisor: Some(context.terminal_supervisor),
             managed_supervisor: Some(context.managed_supervisor),
             cancellation: context.cancellation,
@@ -432,6 +457,19 @@ pub(crate) async fn handle_command_dispatch(
         },
     )
     .await;
+    let _post_execution_guard = match context.post_execution_lock {
+        Some(lock) => Some(lock.lock_owned().await),
+        None => None,
+    };
+    if priority_runtime_command {
+        let current = context.shared_state.snapshot().await?;
+        rebase_priority_runtime_events(
+            local_state,
+            &mut outcome.events_to_send,
+            &current,
+            &command,
+        );
+    }
     if outcome.state_changed {
         context
             .shared_state
@@ -447,6 +485,37 @@ pub(crate) async fn handle_command_dispatch(
         outcome.result_payload,
     )
     .await
+}
+
+pub(crate) fn rebase_priority_runtime_events(
+    local_state: &mut NodeLocalState,
+    events_to_send: &mut [EventEnvelope],
+    current: &NodeLocalState,
+    command: &CommandEnvelope,
+) {
+    let Some(runtime_id) = command.target.runtime_session_id() else {
+        return;
+    };
+    let mut seq = current
+        .runtime_seqs
+        .get(runtime_id.as_str())
+        .copied()
+        .unwrap_or_default();
+    for event in events_to_send
+        .iter_mut()
+        .filter(|event| event.runtime_session_id.as_ref() == Some(runtime_id))
+    {
+        seq = seq.saturating_add(1);
+        event.seq = seq;
+        if let Some(durable) = local_state
+            .event_outbox
+            .iter_mut()
+            .find(|durable| durable.event_id == event.event_id)
+        {
+            durable.seq = seq;
+        }
+    }
+    local_state.runtime_seqs.insert(runtime_id.to_string(), seq);
 }
 
 pub(crate) async fn send_command_result(

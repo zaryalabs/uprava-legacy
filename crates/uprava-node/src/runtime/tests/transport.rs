@@ -149,6 +149,23 @@ fn managed_capabilities_require_a_supported_version_probe() {
 }
 
 #[test]
+fn capabilities_report_the_probed_codex_version_for_policy_pinning() {
+    let mut config = config_fixture();
+    config.codex_version = Some("codex-cli 0.144.1".to_owned());
+
+    let capability = capabilities(&config)
+        .into_iter()
+        .find(|capability| capability.key == "provider.codex.version")
+        .expect("Codex version capability exists");
+
+    assert!(matches!(
+        capability.value,
+        CapabilityValue::Extension { name, value }
+            if name == "provider_version" && value.0 == serde_json::json!("codex-cli 0.144.1")
+    ));
+}
+
+#[test]
 fn codex_version_parser_accepts_pinned_and_prerelease_versions() {
     assert_eq!(parse_numeric_version("0.144.1"), Some((0, 144, 1)));
     assert_eq!(parse_numeric_version("v0.145.0-beta.1"), Some((0, 145, 0)));

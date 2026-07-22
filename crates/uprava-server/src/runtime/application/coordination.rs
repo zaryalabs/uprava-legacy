@@ -569,6 +569,7 @@ pub(crate) async fn lifecycle_command_payload(
                 .current_attempt
                 .as_ref()
                 .map(|attempt| attempt.runtime_attempt_id.clone()),
+            reason: Some("explicit_stop".to_owned()),
         });
     }
     if kind != CommandKind::ResumeRuntime {
@@ -1280,19 +1281,24 @@ pub(crate) async fn apply_event_projection_on_connection(
         }
         EventKind::RuntimeStopped => {
             if let Some(runtime_session_id) = &event.runtime_session_id {
-                update_runtime_state_on_connection(
-                    connection,
-                    runtime_session_id,
-                    RuntimeSessionState::Stopped,
-                    event.happened_at,
-                )
-                .await?;
                 let stop_reason = match event.payload.kind() {
                     EventPayloadKind::RuntimeStopped { data } => {
                         data.reason.as_deref().unwrap_or("runtime_stopped")
                     }
                     _ => "runtime_stopped",
                 };
+                let idle_expired = stop_reason == "idle_expired";
+                update_runtime_state_on_connection(
+                    connection,
+                    runtime_session_id,
+                    if idle_expired {
+                        RuntimeSessionState::Expired
+                    } else {
+                        RuntimeSessionState::Stopped
+                    },
+                    event.happened_at,
+                )
+                .await?;
                 sqlx::query(
                     r#"
                     update runtime_attempts
@@ -1310,9 +1316,11 @@ pub(crate) async fn apply_event_projection_on_connection(
                 .bind(runtime_session_id.as_str())
                 .execute(&mut *connection)
                 .await?;
-                sqlx::query(
-                    "update provider_interactions set state = 'cancelled', resolved_at = ?1 where runtime_session_id = ?2 and state in ('requested', 'resolving')",
-                )
+                sqlx::query(if idle_expired {
+                    "update provider_interactions set state = 'expired', resolved_at = ?1 where runtime_session_id = ?2 and state in ('requested', 'resolving')"
+                } else {
+                    "update provider_interactions set state = 'cancelled', resolved_at = ?1 where runtime_session_id = ?2 and state in ('requested', 'resolving')"
+                })
                 .bind(event.happened_at)
                 .bind(runtime_session_id.as_str())
                 .execute(&mut *connection)
@@ -1321,7 +1329,17 @@ pub(crate) async fn apply_event_projection_on_connection(
             update_session_state_from_event_on_connection(
                 connection,
                 event,
-                SessionThreadState::Stopped,
+                if event
+                    .payload
+                    .0
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("idle_expired")
+                {
+                    SessionThreadState::Degraded
+                } else {
+                    SessionThreadState::Stopped
+                },
             )
             .await?;
         }
@@ -1333,6 +1351,29 @@ pub(crate) async fn apply_event_projection_on_connection(
                     RuntimeSessionState::Error,
                     event.happened_at,
                 )
+                .await?;
+                sqlx::query(
+                    r#"
+                    update runtime_attempts
+                    set state = 'failed', stop_reason = 'runtime_error',
+                        stopped_at = ?1, updated_at = ?1
+                    where runtime_attempt_id = (
+                        select current_attempt_id from runtime_sessions
+                        where runtime_session_id = ?2
+                    )
+                      and state not in ('stopped', 'failed', 'lost')
+                    "#,
+                )
+                .bind(event.happened_at)
+                .bind(runtime_session_id.as_str())
+                .execute(&mut *connection)
+                .await?;
+                sqlx::query(
+                    "update provider_interactions set state = 'cancelled', resolved_at = ?1 where runtime_session_id = ?2 and state in ('requested', 'resolving')",
+                )
+                .bind(event.happened_at)
+                .bind(runtime_session_id.as_str())
+                .execute(&mut *connection)
                 .await?;
             }
             update_session_state_from_event_on_connection(

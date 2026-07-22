@@ -305,7 +305,7 @@ dependencies = [
 
 [[package]]
 name = "codex-app-server-probe"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "axum",
@@ -315,6 +315,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-tungstenite",
+ "uuid",
 ]
 
 [[package]]
@@ -2995,7 +2996,7 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "uprava-logging"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
@@ -3008,7 +3009,7 @@ dependencies = [
 
 [[package]]
 name = "uprava-node"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3030,7 +3031,7 @@ dependencies = [
 
 [[package]]
 name = "uprava-protocol"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "chrono",
  "serde",
@@ -3041,7 +3042,7 @@ dependencies = [
 
 [[package]]
 name = "uprava-server"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3072,7 +3073,7 @@ dependencies = [
 
 [[package]]
 name = "uprava-toolhive"
-version = "0.2.25"
+version = "0.2.26"
 dependencies = [
  "anyhow",
  "axum",

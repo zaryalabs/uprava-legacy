@@ -56,11 +56,15 @@ export function SessionSurface({
     ]);
   };
   const sendTurn = useMutation({
-    mutationFn: (content: string) =>
+    mutationFn: (request: {
+      content: string;
+      collaborationMode: "default" | "plan";
+    }) =>
       runWorkbenchCommand("session.sendTurn", {
         session: session.data?.session,
         runtime: session.data?.session.runtime,
-        turnContent: content,
+        turnContent: request.content,
+        turnCollaborationMode: request.collaborationMode,
         availableCommands: agentProjection.data?.available_commands,
         afterSuccess: invalidateSession,
       }),
@@ -243,7 +247,14 @@ export function SessionSurface({
             <ChatComposer
               pending={sendTurn.isPending}
               disabled={!canSendTurn}
-              onSend={(content) => sendTurn.mutateAsync(content).then(() => {})}
+              supportsPlanMode={
+                session.data.session.runtime.execution_profile === "managed"
+              }
+              onSend={(content, collaborationMode) =>
+                sendTurn
+                  .mutateAsync({ content, collaborationMode })
+                  .then(() => {})
+              }
             />
             <ScheduledMessagesPanel
               sessionThreadId={session.data.session.session_thread_id}

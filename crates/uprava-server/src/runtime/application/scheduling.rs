@@ -249,6 +249,7 @@ pub(crate) async fn dispatch_scheduled_message(
         state,
         session_id.clone(),
         scheduled.content,
+        None,
         CorrelationId::new(),
     )
     .await
@@ -1216,8 +1217,11 @@ pub(crate) async fn start_job_run(state: &AppState, run: &JobRunSummary) -> Resu
     )
     .await?;
     ensure_provider_quota_admission(state, &snapshot.provider, run.force, "job.run").await?;
+    let provider_version =
+        provider_version_for_node(state, &placement.node_id, &snapshot.provider).await?;
     let effective_policy = resolve_effective_runtime_policy(
         &snapshot.provider,
+        provider_version,
         execution_profile,
         &placement.workspace_path,
         provider_capabilities,
@@ -1346,6 +1350,7 @@ pub(crate) async fn drive_starting_job_run(
             state,
             session_id.clone(),
             snapshot.prompt,
+            None,
             CorrelationId::new(),
             ActorRef::System,
         )

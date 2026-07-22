@@ -38,8 +38,24 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PROTOCOL_LINE_BYTES: usize = 1024 * 1024;
 const MAX_STDERR_LINES: usize = 64;
-const MCP_TOKEN_ENV: &str = "UPRAVA_MCP_ACCESS_TOKEN";
-const MCP_PROBE_TOKEN: &str = "uprava-probe-token-never-log-this-value";
+const MCP_TOKEN_ENV_PREFIX: &str = "UPRAVA_MCP_ACCESS_TOKEN_";
+const MCP_PROBE_TOKEN: &str = concat!(
+    "00000000-0000-4000-8000-000000000000.",
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+);
+const PROBE_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "CODEX_SHELL",
+    "CODEX_HOME",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+];
 
 #[derive(Debug)]
 struct Args {
@@ -597,17 +613,32 @@ impl AppServer {
     async fn spawn(codex: &Path, step_timeout: Duration, mcp_endpoint: &str) -> Result<Self> {
         let endpoint = available_loopback_endpoint()?;
         let mcp_endpoint_literal = serde_json::to_string(mcp_endpoint)?;
+        let token_env = format!("{MCP_TOKEN_ENV_PREFIX}{}", uuid::Uuid::new_v4().simple());
+        let inherited = PROBE_ENV_ALLOWLIST
+            .iter()
+            .filter_map(|name| std::env::var_os(name).map(|value| (*name, value)))
+            .collect::<Vec<_>>();
         let mut child = Command::new(codex)
             .args([
                 "app-server",
                 "--listen",
                 &endpoint,
+                "--disable",
+                "shell_snapshot",
+                "--config",
+                "shell_environment_policy.inherit=all",
                 "--config",
                 &format!("mcp_servers.uprava.url={mcp_endpoint_literal}"),
                 "--config",
-                &format!("mcp_servers.uprava.bearer_token_env_var=\"{MCP_TOKEN_ENV}\""),
+                &format!("mcp_servers.uprava.bearer_token_env_var=\"{token_env}\""),
+                "--config",
+                "mcp_servers.uprava.default_tools_approval_mode=\"approve\"",
             ])
-            .env(MCP_TOKEN_ENV, MCP_PROBE_TOKEN)
+            .env_clear()
+            .envs(inherited)
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost")
+            .env(token_env, MCP_PROBE_TOKEN)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

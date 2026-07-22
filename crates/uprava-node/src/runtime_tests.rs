@@ -253,6 +253,7 @@ fn command_fixture_with_content(
         CommandKind::SendTurn => CommandPayload::SendTurn {
             turn_id: TurnId::from("turn-1"),
             content: content.to_owned(),
+            collaboration_mode: None,
         },
         CommandKind::ResolveApproval => CommandPayload::ResolveApproval {
             approval_id: ApprovalId::from("approval-1"),
@@ -269,6 +270,7 @@ fn command_fixture_with_content(
         },
         CommandKind::StopRuntime => CommandPayload::StopRuntime {
             runtime_attempt_id: None,
+            reason: None,
         },
         _ => CommandPayload::Extension {
             name: "test.fixture".to_owned(),

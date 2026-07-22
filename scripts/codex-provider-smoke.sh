@@ -277,6 +277,8 @@ if [ ! -d "$WORKSPACE_PATH/.git" ]; then
     fail "failed to initialize disposable git workspace at $WORKSPACE_PATH"
 fi
 
+(cd "$ROOT_DIR" && cargo build -p uprava-server -p uprava-node)
+
 (
   cd "$ROOT_DIR"
   UPRAVA_CORE_BIND="127.0.0.1:$CORE_PORT" \
@@ -284,7 +286,7 @@ fi
     UPRAVA_DEPLOYMENT_PROFILE="controlled_dev" \
     UPRAVA_ALLOWED_ORIGINS="$WEB_URL,http://localhost:$WEB_PORT" \
     RUST_LOG="info,uprava_server=debug" \
-    cargo run -p uprava-server
+    exec "$ROOT_DIR/target/debug/uprava-server"
 ) >"$STATE_DIR/core.log" 2>&1 &
 PIDS="$PIDS $!"
 
@@ -302,7 +304,7 @@ authenticate
     UPRAVA_CODEX_IGNORE_USER_CONFIG="true" \
     UPRAVA_CODEX_TIMEOUT_SECONDS="$CODEX_TIMEOUT_SECONDS" \
     RUST_LOG="info,uprava_node=debug" \
-    cargo run -p uprava-node
+    exec "$ROOT_DIR/target/debug/uprava-node"
 ) >"$STATE_DIR/node.log" 2>&1 &
 PIDS="$PIDS $!"
 approve_pending_enrollment
@@ -320,7 +322,7 @@ wait_for_auth_contains "codex provider capability" "$CORE_URL/api/v1/inventory" 
 wait_for_auth_contains "codex managed capability" "$CORE_URL/api/v1/inventory" '"provider.codex.managed"'
 
 (
-  cd "$ROOT_DIR"
+  cd "$ROOT_DIR/apps/web"
   UPRAVA_E2E_REAL_API=1 \
     UPRAVA_E2E_CORE_URL="$CORE_URL" \
     UPRAVA_E2E_EXPECTED_NODE="$EXPECTED_NODE" \
@@ -332,10 +334,11 @@ wait_for_auth_contains "codex managed capability" "$CORE_URL/api/v1/inventory" '
     UPRAVA_E2E_WEB_PASSWORD="$WEB_PASSWORD" \
     UPRAVA_E2E_LIFECYCLE=1 \
     UPRAVA_E2E_EXEC_COMPATIBILITY=1 \
+    UPRAVA_E2E_MANAGED_ACCEPTANCE=1 \
     UPRAVA_E2E_TURN_TIMEOUT_MS="$((CODEX_TIMEOUT_SECONDS * 1000))" \
-    UPRAVA_E2E_TEST_TIMEOUT_MS="$(((CODEX_TIMEOUT_SECONDS * 3 + 90) * 1000))" \
+    UPRAVA_E2E_TEST_TIMEOUT_MS="$(((CODEX_TIMEOUT_SECONDS * 8 + 120) * 1000))" \
     PLAYWRIGHT_BASE_URL="$WEB_URL" \
-    make web-e2e
+    npm exec playwright test e2e/real-profile.spec.ts
 ) || fail "codex provider Playwright E2E failed"
 
 {
@@ -345,6 +348,10 @@ wait_for_auth_contains "codex managed capability" "$CORE_URL/api/v1/inventory" '
   printf 'transport=codex-app-server-v2-loopback-websocket\n'
   printf 'managed_default=true\n'
   printf 'exec_compatibility=true\n'
+  printf 'managed_approve_deny=true\n'
+  printf 'managed_user_input=true\n'
+  printf 'managed_interrupt=true\n'
+  printf 'managed_mcp=true\n'
 } >"$STATE_DIR/acceptance.env"
 printf '%s\n' "acceptance metadata: $STATE_DIR/acceptance.env"
 

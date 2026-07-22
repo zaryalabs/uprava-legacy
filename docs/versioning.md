@@ -33,7 +33,7 @@ Release versions описывают состояние репозитория и
 documents должны ссылаться на текущий release baseline, а не на `V01`, когда
 они обсуждают features, доставленные после `0.1.0`.
 
-Current baseline: `0.2.25`.
+Current baseline: `0.2.26`.
 
 ## Release Candidates 0.2.0
 

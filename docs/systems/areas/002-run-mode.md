@@ -25,7 +25,7 @@ process, но session thread, workspace state и resume context должны п�
 stateless/ephemeral strategies, более похожие на Codbash-like resume/launcher
 подход или sandboxed task runtime.
 
-Implementation baseline `0.2.25` закрывает Managed Agent Work Loop поверх
+Implementation baseline `0.2.26` закрывает Managed Agent Work Loop поверх
 Node-owned managed runtime и Core-owned orchestration: Codex app-server остаётся
 живым между turns, Managed является default новых Agent sessions на capable
 Node, а существующий adapter `codex exec/resume` сохранён как отдельный явный
@@ -53,7 +53,9 @@ wire examples сохранены рядом с tool. Реальный прого
 - server-initiated `item/commandExecution/requestApproval` принимает
   `accept` и `decline`, после чего продолжается тот же turn;
 - experimental `item/tool/requestUserInput` является отдельным request type и
-  работает в provider Plan mode;
+  работает в provider Plan mode; Uprava выбирает его per turn через
+  `SendTurnRequest.collaboration_mode=plan` и передаёт effective model,
+  возвращённую `thread/start` или `thread/resume`;
 - `turn/interrupt` завершает active turn со status `interrupted`;
 - `thread/unsubscribe`, новый WebSocket client и `thread/resume` сохраняют
   identity без повторной доставки завершённых item notifications;
@@ -237,7 +239,7 @@ Implementation baseline `0.2.23` материализует control-plane author
   content.
 
 Это закрывает этап 3; Web work surface закрыт baseline `0.2.24`, rollout и
-default-on closure — baseline `0.2.25`.
+default-on closure — baseline `0.2.25`, deployment hardening — `0.2.26`.
 
 ### Agent Web work surface baseline 0.2.24
 
@@ -1338,12 +1340,14 @@ Agent не должен получать broad Uprava admin credentials толь
   binding entity.
 - Core event subscription endpoint для session thread updates.
 - Node command handler для start/resume/send/approve/interrupt/stop.
-- Codex provider adapter behind the Provider Adapter boundary. V01 first
-  adapter uses CLI exec/resume continuity; provider-native live process/session
-  ownership is post-V01 work.
+- Codex provider adapter находится за Provider Adapter boundary. Managed
+  profile владеет живым app-server process/session на Node; CLI `exec/resume`
+  сохранён только как явный compatibility profile без silent fallback.
 - Persist provider resume cursor/session id when available.
 - Track `last_runtime_step_at` from meaningful runtime events.
-- 24h no-steps expiry loop в Node.
+- 24h no-steps expiry scheduler в Core создаёт system `StopRuntime`; Node
+  подтверждает terminal teardown, после чего Core отзывает MCP lease и
+  закрывает pending interactions.
 - Runtime resurrection path для expired sessions.
 - UI states: `ready`, `running`, `blocked`, `expired`, `resuming`, `stale`,
   `stopped` и `error`.
@@ -1351,8 +1355,6 @@ Agent не должен получать broad Uprava admin credentials толь
 
 ### Remaining architecture questions
 
-- When should post-V01 adopt provider-native Codex app-server/live protocol
-  instead of the V01 CLI exec/resume adapter?
 - How much provider raw event data should Core persist for debugging, and how
   much should be normalized only?
 - Do we need per-turn diff attribution in V01, or is session-level diff

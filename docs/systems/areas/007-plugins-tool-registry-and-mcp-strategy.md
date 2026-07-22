@@ -61,10 +61,17 @@ availability и terminal trace recovery. Ручная приёмка Linear OAut
 она не считается подтверждённой кодовыми и mock-проверками.
 
 Baseline эпика 3 добавляет Web management surface для integration,
-managed/observed capabilities и redacted tool-call trace. Primary Codex path
-получает Uprava MCP endpoint и краткоживущий lease перед каждым новым turn через
-authenticated Node transport: token не входит в durable command, process args,
-prompt или transcript и передаётся Codex только через environment. Connect и
+managed/observed capabilities и redacted tool-call trace. Primary Codex Managed
+path получает Uprava MCP endpoint и session-scoped process lease через
+authenticated Node transport, переиспользует его до bounded refresh window и
+ротирует replacement app-server с provider-native resume. Token не входит в
+durable command, process args, prompt или transcript и передаётся Codex через
+одноразовое имя environment variable из очищенного allowlist; provider
+`shell_snapshot` выключен, чтобы cached credential предыдущего process не мог
+подменить lease. Codex approval для встроенного `uprava` MCP server считается
+уже выданным, потому что Search/Inspect/Execute проходят Core-owned permission,
+approval, audit и trace boundary; эта настройка не применяется к внешним MCP
+servers. Connect и
 Reconnect возвращают валидированный Linear authorization URL только текущему
 Web-запросу, а heartbeat завершает actual-state reconciliation. Disconnect
 немедленно закрывает effective availability; без отдельного upstream proof Core

@@ -7,11 +7,23 @@ import { Textarea } from "../../shared/ui/textarea";
 type Props = {
   pending: boolean;
   disabled?: boolean;
-  onSend: (content: string) => Promise<void> | void;
+  supportsPlanMode?: boolean;
+  onSend: (
+    content: string,
+    collaborationMode: "default" | "plan",
+  ) => Promise<void> | void;
 };
 
-export function ChatComposer({ pending, disabled = false, onSend }: Props) {
+export function ChatComposer({
+  pending,
+  disabled = false,
+  supportsPlanMode = false,
+  onSend,
+}: Props) {
   const [content, setContent] = useState("");
+  const [collaborationMode, setCollaborationMode] = useState<
+    "default" | "plan"
+  >("default");
 
   useEffect(() => {
     if (!content.trim()) return;
@@ -30,7 +42,7 @@ export function ChatComposer({ pending, disabled = false, onSend }: Props) {
         event.preventDefault();
         const trimmed = content.trim();
         if (disabled || !trimmed) return;
-        void Promise.resolve(onSend(trimmed))
+        void Promise.resolve(onSend(trimmed, collaborationMode))
           .then(() => {
             setContent("");
           })
@@ -56,7 +68,7 @@ export function ChatComposer({ pending, disabled = false, onSend }: Props) {
         placeholder="Send a turn"
         disabled={disabled}
       />
-      <div className="mt-2 flex items-center justify-between gap-3">
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
         <span
           className="text-xs text-[var(--color-muted)]"
           role="status"
@@ -68,14 +80,35 @@ export function ChatComposer({ pending, disabled = false, onSend }: Props) {
               ? "Draft not sent"
               : "Ready"}
         </span>
-        <Button
-          type="submit"
-          variant="primary"
-          disabled={disabled || pending || !content.trim()}
-        >
-          <Send size={15} aria-hidden="true" />
-          {pending ? "Sending…" : "Send Turn"}
-        </Button>
+        <div className="flex items-center gap-2">
+          {supportsPlanMode ? (
+            <label className="flex items-center gap-2 text-xs font-medium">
+              Mode
+              <select
+                aria-label="Turn collaboration mode"
+                className="h-9 border border-[var(--color-muted)] bg-[var(--color-bg)] px-2 text-sm"
+                value={collaborationMode}
+                disabled={disabled || pending}
+                onChange={(event) =>
+                  setCollaborationMode(
+                    event.target.value === "plan" ? "plan" : "default",
+                  )
+                }
+              >
+                <option value="default">Default</option>
+                <option value="plan">Plan (can ask questions)</option>
+              </select>
+            </label>
+          ) : null}
+          <Button
+            type="submit"
+            variant="primary"
+            disabled={disabled || pending || !content.trim()}
+          >
+            <Send size={15} aria-hidden="true" />
+            {pending ? "Sending…" : "Send Turn"}
+          </Button>
+        </div>
       </div>
     </form>
   );

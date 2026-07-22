@@ -18,13 +18,18 @@ const turnTimeoutMs = Number(process.env.UPRAVA_E2E_TURN_TIMEOUT_MS ?? "30000");
 const lifecycleEnabled = process.env.UPRAVA_E2E_LIFECYCLE === "1";
 const execCompatibilityEnabled =
   process.env.UPRAVA_E2E_EXEC_COMPATIBILITY === "1";
+const managedAcceptanceEnabled =
+  process.env.UPRAVA_E2E_MANAGED_ACCEPTANCE === "1";
 const testTimeoutMs = Number(
   process.env.UPRAVA_E2E_TEST_TIMEOUT_MS ??
     String(
       Math.max(
         30_000,
         turnTimeoutMs *
-          (1 + Number(lifecycleEnabled) + Number(execCompatibilityEnabled)) +
+          (1 +
+            Number(lifecycleEnabled) +
+            Number(execCompatibilityEnabled) +
+            5 * Number(managedAcceptanceEnabled)) +
           45_000,
       ),
     ),
@@ -70,6 +75,18 @@ test.describe("real local profile", () => {
       expectedAssistantContent,
     );
     await waitForRuntimeState(request, sessionUrl, "ready");
+
+    if (managedAcceptanceEnabled) {
+      const runtimeId = runtimeIdFromDetail(session);
+      expect(runtimeId).not.toBe("");
+      await exerciseManagedAcceptance(
+        request,
+        sessionUrl,
+        sessionId,
+        runtimeId,
+        csrfToken,
+      );
+    }
 
     await page.goto(`/sessions/${sessionId}`);
     await expect
@@ -289,6 +306,188 @@ function runtimePolicyField(value: unknown, field: string) {
     return "";
   }
   return stringField(value.session.runtime.effective_policy, field);
+}
+
+function runtimeIdFromDetail(value: unknown) {
+  if (
+    !isRecord(value) ||
+    !isRecord(value.session) ||
+    !isRecord(value.session.runtime)
+  ) {
+    return "";
+  }
+  return stringField(value.session.runtime, "runtime_session_id");
+}
+
+async function exerciseManagedAcceptance(
+  request: APIRequestContext,
+  sessionUrl: string,
+  sessionId: string,
+  runtimeId: string,
+  csrfToken: string,
+) {
+  await postJson(
+    request,
+    `${sessionUrl}/turns`,
+    {
+      content:
+        "Use the Uprava MCP search_tools tool with query `workspace`. Then reply exactly UPRAVA_MCP_OK.",
+    },
+    csrfToken,
+  );
+  await waitForAssistantContent(request, sessionUrl, "UPRAVA_MCP_OK");
+  await waitForRuntimeState(request, sessionUrl, "ready");
+  await expect
+    .poll(
+      async () => {
+        const detail = await getJson(request, sessionUrl);
+        return JSON.stringify(detail).includes("search_tools");
+      },
+      { timeout: turnTimeoutMs, intervals: [500, 1_000, 2_000] },
+    )
+    .toBe(true);
+
+  await postJson(
+    request,
+    `${sessionUrl}/turns`,
+    {
+      content:
+        "Use the shell tool to run `printf accepted > uprava-acceptance-approved.txt`. After the tool attempt completes, reply exactly UPRAVA_APPROVAL_ALLOWED.",
+    },
+    csrfToken,
+  );
+  const approved = await waitForPendingInteraction(
+    request,
+    sessionUrl,
+    "approval",
+  );
+  await postJson(
+    request,
+    `${coreUrl}/api/v1/sessions/${encodeURIComponent(sessionId)}/provider-interactions/${encodeURIComponent(approved)}/approval`,
+    { approved: true, message: "host acceptance approve" },
+    csrfToken,
+  );
+  await waitForAssistantContent(request, sessionUrl, "UPRAVA_APPROVAL_ALLOWED");
+  await waitForRuntimeState(request, sessionUrl, "ready");
+
+  await postJson(
+    request,
+    `${sessionUrl}/turns`,
+    {
+      content:
+        "Use the shell tool to run `printf denied > uprava-acceptance-denied.txt`. After the tool attempt completes, reply exactly UPRAVA_APPROVAL_DENIED.",
+    },
+    csrfToken,
+  );
+  const denied = await waitForPendingInteraction(
+    request,
+    sessionUrl,
+    "approval",
+  );
+  await postJson(
+    request,
+    `${coreUrl}/api/v1/sessions/${encodeURIComponent(sessionId)}/provider-interactions/${encodeURIComponent(denied)}/approval`,
+    { approved: false, message: "host acceptance deny" },
+    csrfToken,
+  );
+  await waitForAssistantContent(request, sessionUrl, "UPRAVA_APPROVAL_DENIED");
+  await waitForRuntimeState(request, sessionUrl, "ready");
+
+  await postJson(
+    request,
+    `${sessionUrl}/turns`,
+    {
+      content:
+        "Use the request_user_input tool to ask one question with id `acceptance` and options Alpha and Beta. After the answer, reply exactly UPRAVA_INPUT_OK.",
+      collaboration_mode: "plan",
+    },
+    csrfToken,
+  );
+  const input = await waitForPendingInteraction(
+    request,
+    sessionUrl,
+    "user_input",
+  );
+  await postJson(
+    request,
+    `${coreUrl}/api/v1/sessions/${encodeURIComponent(sessionId)}/provider-interactions/${encodeURIComponent(input)}/input`,
+    { answers: ["Alpha"] },
+    csrfToken,
+  );
+  await waitForAssistantContent(request, sessionUrl, "UPRAVA_INPUT_OK");
+  await waitForRuntimeState(request, sessionUrl, "ready");
+
+  await postJson(
+    request,
+    `${sessionUrl}/turns`,
+    {
+      content:
+        "Run the shell command `sleep 30`, wait for it, then reply UPRAVA_INTERRUPT_MISSED.",
+    },
+    csrfToken,
+  );
+  const sleepApproval = await waitForPendingInteraction(
+    request,
+    sessionUrl,
+    "approval",
+  );
+  await postJson(
+    request,
+    `${coreUrl}/api/v1/sessions/${encodeURIComponent(sessionId)}/provider-interactions/${encodeURIComponent(sleepApproval)}/approval`,
+    { approved: true, message: "host acceptance interrupt" },
+    csrfToken,
+  );
+  await waitForRuntimeState(request, sessionUrl, "running");
+  await postJson(
+    request,
+    `${coreUrl}/api/v1/runtime-sessions/${encodeURIComponent(runtimeId)}/interrupt`,
+    undefined,
+    csrfToken,
+  );
+  await waitForRuntimeState(request, sessionUrl, "ready");
+  await expect
+    .poll(
+      async () =>
+        JSON.stringify(await getJson(request, sessionUrl)).includes(
+          "turn.interrupted",
+        ),
+      { timeout: turnTimeoutMs, intervals: [500, 1_000, 2_000] },
+    )
+    .toBe(true);
+}
+
+async function waitForPendingInteraction(
+  request: APIRequestContext,
+  sessionUrl: string,
+  kind: "approval" | "user_input",
+) {
+  let interactionId = "";
+  await expect
+    .poll(
+      async () => {
+        const detail = await getJson(request, sessionUrl);
+        interactionId = pendingInteractionId(detail, kind);
+        return interactionId;
+      },
+      { timeout: turnTimeoutMs, intervals: [250, 500, 1_000] },
+    )
+    .not.toBe("");
+  return interactionId;
+}
+
+function pendingInteractionId(value: unknown, kind: string) {
+  if (!isRecord(value) || !Array.isArray(value.pending_interactions)) {
+    return "";
+  }
+  const interaction = value.pending_interactions.find(
+    (candidate) =>
+      isRecord(candidate) &&
+      stringField(candidate, "kind") === kind &&
+      stringField(candidate, "state") === "requested",
+  );
+  return isRecord(interaction)
+    ? stringField(interaction, "provider_interaction_id")
+    : "";
 }
 
 async function waitForRuntimeState(

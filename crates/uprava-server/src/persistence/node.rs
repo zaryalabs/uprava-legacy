@@ -658,6 +658,27 @@ pub(crate) async fn ensure_session_commandable(
     detail: &SessionDetail,
     command_kind: CommandKind,
 ) -> Result<(), AppError> {
+    if command_kind == CommandKind::ResumeRuntime {
+        let stop_pending: bool = sqlx::query_scalar(
+            r#"
+            select exists(
+                select 1 from commands
+                where runtime_session_id = ?1
+                  and kind = 'StopRuntime'
+                  and state not in ('completed', 'failed', 'expired')
+            )
+            "#,
+        )
+        .bind(detail.session.runtime.runtime_session_id.as_str())
+        .fetch_one(&state.pool)
+        .await?;
+        if stop_pending {
+            return Err(AppError::conflict(
+                "runtime.stop_pending",
+                "Runtime stop must finish before it can be resumed",
+            ));
+        }
+    }
     if command_requires_attached_session(command_kind)
         && detail.session.state == SessionThreadState::Detached
     {
@@ -875,6 +896,30 @@ pub(crate) async fn ensure_node_supports_execution_profile(
             unavailable.join(", ")
         ),
     ))
+}
+
+pub(crate) async fn provider_version_for_node(
+    state: &AppState,
+    node_id: &NodeId,
+    provider: &str,
+) -> Result<Option<String>, AppError> {
+    let capability_json: Option<String> = sqlx::query_scalar(
+        "select value_json from node_capabilities where node_id = ?1 and capability_key = ?2",
+    )
+    .bind(node_id.as_str())
+    .bind(format!("provider.{provider}.version"))
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some(capability_json) = capability_json else {
+        return Ok(None);
+    };
+    let capability: CapabilityValue = serde_json::from_str(&capability_json)?;
+    Ok(match capability {
+        CapabilityValue::Extension { name, value } if name == "provider_version" => {
+            value.0.as_str().map(str::to_owned)
+        }
+        _ => None,
+    })
 }
 
 pub(crate) async fn node_supports_capability(

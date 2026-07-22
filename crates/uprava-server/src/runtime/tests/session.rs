@@ -4,10 +4,20 @@ use super::*;
 async fn create_session_without_profile_defaults_to_managed_on_capable_node() {
     let state = test_state().await;
     let (node_id, compatibility, workspace_path) = create_test_session(&state).await;
-    let capabilities = std::iter::once(CapabilitySummary {
-        key: "provider.codex".to_owned(),
-        value: CapabilityValue::provider(true),
-    })
+    let capabilities = [
+        CapabilitySummary {
+            key: "provider.codex".to_owned(),
+            value: CapabilityValue::provider(true),
+        },
+        CapabilitySummary {
+            key: "provider.codex.version".to_owned(),
+            value: CapabilityValue::Extension {
+                name: "provider_version".to_owned(),
+                value: JsonValue(json!("codex-cli 0.144.1")),
+            },
+        },
+    ]
+    .into_iter()
     .chain(
         ProviderRuntimeCapability::required_for_managed_codex()
             .iter()
@@ -64,6 +74,10 @@ async fn create_session_without_profile_defaults_to_managed_on_capable_node() {
             ProviderApprovalMode::Untrusted,
             stored_hash.clone(),
         )
+    );
+    assert_eq!(
+        policy.provider_version.as_deref(),
+        Some("codex-cli 0.144.1")
     );
     std::fs::remove_dir_all(&workspace_path).expect("workspace dir removes");
 }
@@ -308,6 +322,7 @@ async fn send_turn_persists_durable_turn_and_user_message() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "persist this turn".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await
@@ -326,9 +341,24 @@ async fn send_turn_persists_durable_turn_and_user_message() {
     .fetch_one(&state.pool)
     .await
     .expect("turn row loads");
+    let command_json: String =
+        sqlx::query_scalar("select command_json from commands where command_id = ?1")
+            .bind(response.command_id.as_str())
+            .fetch_one(&state.pool)
+            .await
+            .expect("turn command loads");
+    let command: CommandEnvelope =
+        serde_json::from_str(&command_json).expect("turn command decodes");
     std::fs::remove_dir_all(&workspace_path).expect("workspace dir removes");
 
     assert_eq!(turn_state, "created");
     assert_eq!(content, "persist this turn");
     assert_eq!(user_message_count, 1);
+    assert!(matches!(
+        command.payload,
+        CommandPayload::SendTurn {
+            collaboration_mode: None,
+            ..
+        }
+    ));
 }

@@ -49,8 +49,10 @@ pub(crate) async fn create_session_with_correlation(
     )
     .await?;
     ensure_provider_quota_admission(state, &provider, request.force, "session.start").await?;
+    let provider_version = provider_version_for_node(state, &placement.node_id, &provider).await?;
     let effective_policy = resolve_effective_runtime_policy(
         &provider,
+        provider_version,
         execution_profile,
         &placement.workspace_path,
         provider_capabilities,
@@ -201,8 +203,10 @@ pub(crate) async fn preview_session_policy_route(
         request.execution_profile,
     )
     .await?;
+    let provider_version = provider_version_for_node(&state, &placement.node_id, provider).await?;
     let effective_policy = resolve_effective_runtime_policy(
         provider,
+        provider_version,
         request.execution_profile,
         &placement.workspace_path,
         capabilities,
@@ -218,6 +222,7 @@ pub(crate) async fn preview_session_policy_route(
 
 pub(crate) fn resolve_effective_runtime_policy(
     provider: &str,
+    provider_version: Option<String>,
     execution_profile: AgentExecutionProfile,
     workspace_root: &str,
     provider_capabilities: Vec<ProviderRuntimeCapability>,
@@ -238,7 +243,7 @@ pub(crate) fn resolve_effective_runtime_policy(
         contract_version: 1,
         execution_profile,
         provider: provider.to_owned(),
-        provider_version: None,
+        provider_version,
         provider_capabilities,
         sandbox_mode,
         approval_mode,
@@ -490,7 +495,14 @@ pub(crate) async fn send_turn_with_correlation(
     request: SendTurnRequest,
     correlation_id: CorrelationId,
 ) -> Result<CommandAcceptedResponse, AppError> {
-    submit_turn_with_correlation(state, session_id, request.content, correlation_id).await
+    submit_turn_with_correlation(
+        state,
+        session_id,
+        request.content,
+        request.collaboration_mode,
+        correlation_id,
+    )
+    .await
 }
 
 pub(crate) async fn create_deduction_route(
@@ -1192,12 +1204,14 @@ pub(crate) async fn submit_turn_with_correlation(
     state: &AppState,
     session_id: SessionThreadId,
     content: String,
+    collaboration_mode: Option<String>,
     correlation_id: CorrelationId,
 ) -> Result<CommandAcceptedResponse, AppError> {
     submit_turn_for_actor(
         state,
         session_id,
         content,
+        collaboration_mode,
         correlation_id,
         ActorRef::local_user(),
     )
@@ -1208,6 +1222,7 @@ pub(crate) async fn submit_turn_for_actor(
     state: &AppState,
     session_id: SessionThreadId,
     content: String,
+    collaboration_mode: Option<String>,
     correlation_id: CorrelationId,
     actor_ref: ActorRef,
 ) -> Result<CommandAcceptedResponse, AppError> {
@@ -1217,8 +1232,26 @@ pub(crate) async fn submit_turn_for_actor(
             "Turn content cannot be empty",
         ));
     }
+    let collaboration_mode = match collaboration_mode.as_deref() {
+        None | Some("default") => None,
+        Some("plan") => Some("plan".to_owned()),
+        Some(_) => {
+            return Err(AppError::bad_request(
+                "validation.collaboration_mode_invalid",
+                "Collaboration mode must be `default` or `plan`",
+            ))
+        }
+    };
 
     let detail = load_session_detail(state, &session_id).await?;
+    if collaboration_mode.is_some()
+        && detail.session.runtime.execution_profile != AgentExecutionProfile::Managed
+    {
+        return Err(AppError::bad_request(
+            "validation.collaboration_mode_unsupported",
+            "Plan collaboration mode requires a managed runtime",
+        ));
+    }
     ensure_session_commandable(state, &detail, CommandKind::SendTurn).await?;
     let now = Utc::now();
     let command_id = CommandId::new();
@@ -1243,6 +1276,7 @@ pub(crate) async fn submit_turn_for_actor(
         payload: CommandPayload::SendTurn {
             content: content.clone(),
             turn_id: turn_id.clone(),
+            collaboration_mode,
         },
     };
     record_turn_submission(

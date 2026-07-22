@@ -2,7 +2,7 @@
 
 Статус: `active`
 
-Runbook относится к implementation baseline `0.2.25` и описывает rollout,
+Runbook относится к implementation baseline `0.2.26` и описывает rollout,
 диагностику, recovery и host-only acceptance для provider-native Managed Agent
 runtime. Поддерживаемый первый профиль — Codex app-server v2 через loopback
 WebSocket на Node; проверенный compatibility baseline — `codex-cli 0.144.1`.
@@ -18,6 +18,13 @@ WebSocket на Node; проверенный compatibility baseline — `codex-cl
   acknowledgement в Web и `runtime.policy.unsafe_override` в audit.
 - Stored profile существующей session не меняется после upgrade или нового
   heartbeat. Migration 18 сохраняет старые sessions как `exec_compatibility`.
+- Composer Managed session позволяет выбрать `Default` или `Plan`. Public
+  `SendTurnRequest.collaboration_mode` принимает `default | plan`; Core
+  отклоняет Plan для Exec compatibility. Node передаёт Plan как typed
+  explicit `default | plan` `collaborationMode` с effective model из
+  `thread/start`/`thread/resume`, что не позволяет Plan протечь в следующий
+  turn и делает provider user-input requests доступными без скрытой
+  конфигурации.
 - Internal Job runtime по-прежнему задаёт `exec_compatibility` явно. Task Run
   остаётся независимым OpenSandbox contract без interactive session.
 
@@ -56,11 +63,13 @@ Deterministic `make c` покрывает следующие границы:
 | Node restart со stale process descriptor | Attempt становится lost/provider-resumable; stale PID не считается live evidence. |
 | provider crash или transport loss | Публикуется typed failure/recovery; Exec compatibility не запускается. |
 | expired или replayed interaction | Late decision отклоняется, новый provider command не создаётся. |
-| stop/interrupt | Управление ограничено current attempt; stop закрывает attempt, отменяет pending interactions и отзывает session MCP leases. |
-| Managed start/resume MCP bootstrap | Lease выдаётся только привязанной Node и eligible command; доступ остановленной session ограничен живой `ResumeRuntime` command и закрывается при terminal result. |
+| stop/interrupt/shutdown | Управление ограничено current attempt; interrupt не блокируется socket mutex, имеет bounded confirmation и TERM/KILL escalation, stop закрывает attempt, отменяет pending interactions и отзывает session MCP leases. Node держит SIGINT/SIGTERM handler активным на всём supervisor loop и завершает managed children при service shutdown. |
+| Managed start/resume MCP bootstrap | Process lease переиспользуется до refresh window; при rotation Node поднимает replacement app-server с новым credential и делает provider-native resume до остановки старого. Встроенный `uprava` server имеет provider approval mode `approve`, потому что Search/Inspect/Execute уже проходят Core-owned permission и approval boundary. Доступ остановленной session ограничен живой `ResumeRuntime` command. |
+| Codex повторно использует cached shell snapshot | Node отключает provider `shell_snapshot`, задаёт одноразовое имя MCP secret-env и наследует его только из предварительно очищенного allowlist environment. Lease value не попадает в argv/config/log. Rejected lease логируется только с несекретным lease id. |
+| неизвестный app-server callback | Node отвечает protocol error, завершает provider process и публикует `provider.managed_callback_unsupported`, не оставляя turn зависшим. |
 | параллельные command/event/MCP writes в SQLite | Lease rotation и event projection резервируют writer до read snapshot; Node outbox не теряет `RuntimeReady` из-за `SQLITE_BUSY_SNAPSHOT`. |
 | queue pressure и oversized payload | Bounded queue/payload diagnostics без fabricated success. |
-| 24h idle expiry | Runtime становится expired и допускает только explicit resume. |
+| 24h idle expiry | Core записывает system StopRuntime, Node завершает provider process, Core отзывает MCP lease и помечает interactions expired; resume разрешён только после terminal stop confirmation. |
 | existing Agent, Job и Task contracts | Existing profile immutable; Job остаётся Exec; Task не создаёт Agent session. |
 
 Основные regression suites находятся в Core `runtime/tests/{control,event,runtime,session,scheduling,task}.rs`
@@ -82,7 +91,16 @@ Smoke создаёт disposable Core/Web/Node и Git workspace, затем пр�
 3. Web detach/attach не останавливает provider.
 4. Stop и provider-native Resume создают новый attempt той же session.
 5. Второй turn после Resume завершается и остаётся после Web reload.
-6. Explicit Exec compatibility session стартует и выполняет отдельный turn.
+6. Approve и deny продолжают тот же provider turn через typed interactions.
+7. Turn с `collaboration_mode=plan` создаёт provider user-input question и
+   получает typed answer.
+8. Длинный turn прерывается, а живой runtime возвращается в `ready`.
+9. Uprava MCP `search_tools` вызывается реальным provider process.
+10. Explicit Exec compatibility session стартует и выполняет отдельный turn.
+
+Host target запускает только real-profile Playwright scenario; полный
+детерминированный Web suite остаётся частью `make c`. После cleanup не должно
+оставаться app-server процессов с cwd внутри disposable smoke workspace.
 
 На чистом checkout enrollment имеет отдельное startup-окно: компиляция Node не
 расходует короткий HTTP readiness budget.
@@ -92,27 +110,19 @@ version, OS, transport и пройденные profile gates. Prompt, output и 
 в acceptance record не записываются. Core/Node/Web logs остаются рядом для
 локальной диагностики; перед публикацией evidence их нужно scrub.
 
-Provider interactions и MCP дополнительно проверяются вручную на той же
-Managed session:
-
-1. Попросить выполнить безопасную команду, approve typed request и убедиться,
-   что продолжается тот же turn; повторить с deny.
-2. В provider mode, поддерживающем user input, запросить уточнение и ответить
-   через question card.
-3. Запустить длинный turn, нажать Interrupt и убедиться, что late interaction
-   больше нельзя разрешить.
-4. Попросить вызвать MCP `search_tools`; проверить tool activity и отсутствие
-   lease token в args, trace и logs.
-
-Если конкретная Codex version не предоставляет user-input request в выбранном
-mode, это фиксируется как provider limitation, а не заменяется approval или
-reconstructed prompt.
+Acceptance завершается ошибкой, если конкретная Codex version не предоставляет
+user-input request, approval continuation, interrupt или MCP в выбранном mode;
+такая версия не получает deployment evidence.
 
 ## Диагностика и rollback
 
 Сначала зафиксируйте execution profile, runtime/attempt state, recovery reason,
 policy hash, Node capability reason и последние bounded provider events. Не
 копируйте raw environment, auth files или MCP bearer values.
+
+При `mcp_lease.invalid` сравнивайте только `presented_lease_id` в Core warning с
+`lease_id` audit-события `provider.mcp_access.issued`. Значения bearer token и
+полный environment в диагностические материалы не включайте.
 
 Rollback выполняется только для новых sessions: пользователь явно выбирает
 Exec compatibility и подтверждает unrestricted posture. Existing Managed

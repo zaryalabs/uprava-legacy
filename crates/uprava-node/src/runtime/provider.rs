@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) const UPRAVA_MCP_TOKEN_ENV: &str = "UPRAVA_MCP_ACCESS_TOKEN";
+pub(crate) const UPRAVA_MCP_TOKEN_ENV_PREFIX: &str = "UPRAVA_MCP_ACCESS_TOKEN_";
 
 #[derive(Debug, Clone)]
 pub(crate) enum RuntimeManager {
@@ -203,7 +203,12 @@ impl CodexManagedDriver<'_> {
                 .await
             }
             CommandKind::SendTurn => {
-                let CommandPayload::SendTurn { content, turn_id } = &command.payload else {
+                let CommandPayload::SendTurn {
+                    content,
+                    turn_id,
+                    collaboration_mode,
+                } = &command.payload
+                else {
                     return vec![runtime_error_event(
                         "codex",
                         command,
@@ -214,12 +219,34 @@ impl CodexManagedDriver<'_> {
                         "SendTurn payload does not match its command kind",
                     )];
                 };
+                if let Some(access) = provider_mcp_access {
+                    if let Err(error) = self
+                        .supervisor
+                        .refresh_mcp_access(self.config, &runtime_id, access)
+                        .await
+                    {
+                        return vec![runtime_error_event(
+                            "codex",
+                            command,
+                            runtime_seqs,
+                            runtime_id,
+                            Some(turn_id.clone()),
+                            error.code,
+                            error.message,
+                        )];
+                    }
+                }
                 if let Some(attempt) = managed_attempts.get_mut(runtime_id.as_str()) {
                     attempt.active_turn_id = Some(turn_id.clone());
                 }
                 match self
                     .supervisor
-                    .send_turn(&runtime_id, content.clone(), cancellation)
+                    .send_turn(
+                        &runtime_id,
+                        content.clone(),
+                        collaboration_mode.clone(),
+                        cancellation,
+                    )
                     .await
                 {
                     Ok(operation) => {
@@ -395,6 +422,12 @@ impl CodexManagedDriver<'_> {
                             );
                         }
                         managed_attempts.insert(runtime_id.to_string(), stopped);
+                        let reason = match &command.payload {
+                            CommandPayload::StopRuntime { reason, .. } => {
+                                reason.as_deref().unwrap_or("explicit_stop")
+                            }
+                            _ => "explicit_stop",
+                        };
                         vec![event_for_command(
                             "codex",
                             command,
@@ -406,7 +439,7 @@ impl CodexManagedDriver<'_> {
                                 "provider": "codex",
                                 "mode": "managed",
                                 "runtime_attempt_id": attempt_id,
-                                "reason": "explicit_stop",
+                                "reason": reason,
                             }),
                         )]
                     }
@@ -510,6 +543,49 @@ impl CodexManagedDriver<'_> {
                 "Managed Codex runtime requires a workspace path",
             )];
         };
+        let workspace = match canonical_workspace_root_for_allowed_paths(
+            &self.config.workspace_paths,
+            workspace,
+        ) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                return vec![runtime_error_event(
+                    "codex",
+                    command,
+                    runtime_seqs,
+                    runtime_id,
+                    None,
+                    error.code,
+                    error.message,
+                )]
+            }
+        };
+        let policy_workspace = match std::fs::canonicalize(&policy.workspace_root) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                return vec![runtime_error_event(
+                    "codex",
+                    command,
+                    runtime_seqs,
+                    runtime_id,
+                    None,
+                    "provider.managed_policy_workspace_invalid",
+                    format!("Effective policy workspace could not be canonicalized: {error}"),
+                )]
+            }
+        };
+        if workspace != policy_workspace {
+            return vec![runtime_error_event(
+                "codex",
+                command,
+                runtime_seqs,
+                runtime_id,
+                None,
+                "provider.managed_policy_workspace_mismatch",
+                "Managed command workspace does not match the immutable effective policy",
+            )];
+        }
+        let workspace = workspace.display().to_string();
         let resume_thread_id = if command.kind == CommandKind::ResumeRuntime {
             command_provider_resume_ref(command)
                 .or_else(|| {
@@ -526,7 +602,7 @@ impl CodexManagedDriver<'_> {
             .start(
                 self.config,
                 &runtime_id,
-                workspace,
+                &workspace,
                 policy,
                 &calculated_hash,
                 resume_thread_id.as_deref(),
@@ -685,7 +761,7 @@ async fn managed_operation_events(
                     "runtime_attempt_id": attempt_id,
                     "interaction_kind": kind,
                     "prompt": prompt,
-                    "expires_at": null,
+                    "expires_at": Utc::now() + chrono::Duration::hours(24),
                 }),
                 effective_turn_id.clone(),
             ),
@@ -749,6 +825,11 @@ async fn managed_operation_events(
             if !matches!(kind, EventKind::ProviderInteractionRequested) {
                 if let Some(attempt) = managed_attempts.get_mut(runtime_id.as_str()) {
                     attempt.active_turn_id = None;
+                    if kind == EventKind::RuntimeError {
+                        attempt.state = RuntimeAttemptState::Failed;
+                        attempt.stopped_at = Some(Utc::now());
+                        attempt.terminal_reason = Some("managed_operation_failed".to_owned());
+                    }
                 }
             }
             match kind {
@@ -765,15 +846,17 @@ async fn managed_operation_events(
                         "reason": "provider_interaction_requested",
                     }),
                 )),
-                EventKind::TurnCompleted => events.push(event_for_command(
-                    "codex",
-                    command,
-                    runtime_seqs,
-                    runtime_id.clone(),
-                    None,
-                    EventKind::RuntimeReady,
-                    serde_json::json!({ "provider": "codex", "mode": "managed" }),
-                )),
+                EventKind::TurnCompleted | EventKind::TurnInterrupted => {
+                    events.push(event_for_command(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id.clone(),
+                        None,
+                        EventKind::RuntimeReady,
+                        serde_json::json!({ "provider": "codex", "mode": "managed" }),
+                    ))
+                }
                 _ => {}
             }
             break;
@@ -789,7 +872,9 @@ fn validate_managed_attempt(
 ) -> Option<ManagedRuntimeError> {
     let requested = match &command.payload {
         CommandPayload::InterruptRuntime { runtime_attempt_id }
-        | CommandPayload::StopRuntime { runtime_attempt_id } => runtime_attempt_id.as_ref(),
+        | CommandPayload::StopRuntime {
+            runtime_attempt_id, ..
+        } => runtime_attempt_id.as_ref(),
         _ => None,
     }?;
     let current = attempts.get(runtime_id.as_str())?;
@@ -1191,7 +1276,10 @@ impl CodexProviderAdapter {
         mut live_event_sink: Option<&mut NodeLiveEventSink<'_>>,
         cancellation: Option<watch::Receiver<bool>>,
     ) -> Vec<EventEnvelope> {
-        let CommandPayload::SendTurn { content, turn_id } = &command.payload else {
+        let CommandPayload::SendTurn {
+            content, turn_id, ..
+        } = &command.payload
+        else {
             return vec![runtime_error_event(
                 self.provider_key(),
                 command,
@@ -1792,14 +1880,25 @@ pub(crate) fn configure_uprava_mcp(
             "Uprava MCP endpoint could not be encoded for Codex",
         )
     })?;
+    // Codex persists shell environment snapshots between app-server launches. A stable secret
+    // variable name can therefore resolve to a previous runtime's revoked lease even though the
+    // child process received the current value. A per-process name keeps the credential ephemeral
+    // without placing its value in argv or provider configuration.
+    let token_env = format!("{UPRAVA_MCP_TOKEN_ENV_PREFIX}{}", Uuid::new_v4().simple());
     command
+        .arg("--disable")
+        .arg("shell_snapshot")
+        .arg("--config")
+        .arg("shell_environment_policy.inherit=all")
         .arg("--config")
         .arg(format!("mcp_servers.uprava.url={endpoint_literal}"))
         .arg("--config")
         .arg(format!(
-            "mcp_servers.uprava.bearer_token_env_var=\"{UPRAVA_MCP_TOKEN_ENV}\""
+            "mcp_servers.uprava.bearer_token_env_var=\"{token_env}\""
         ))
-        .env(UPRAVA_MCP_TOKEN_ENV, access.access_token.expose_secret());
+        .arg("--config")
+        .arg("mcp_servers.uprava.default_tools_approval_mode=\"approve\"")
+        .env(token_env, access.access_token.expose_secret());
     Ok(())
 }
 
@@ -1808,7 +1907,11 @@ const PROVIDER_ENV_ALLOWLIST: &[&str] = &[
     "PATHEXT",
     "SYSTEMROOT",
     "COMSPEC",
+    "SHELL",
+    "CODEX_SHELL",
     "HOME",
+    "USER",
+    "LOGNAME",
     "USERPROFILE",
     "APPDATA",
     "LOCALAPPDATA",

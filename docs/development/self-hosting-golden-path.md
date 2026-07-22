@@ -101,7 +101,7 @@ state, включая auth, находится в `/var/lib/uprava/.codex` с п
 `ProtectHome=true`: daemon получает system CLI и собственный state, но не
 доступ к `/home`.
 
-Baseline `0.2.25` запускает новые Agent sessions через provider-native Managed
+Baseline `0.2.26` запускает новые Agent sessions через provider-native Managed
 path с safe sandbox и реальными approvals, если Node объявил полный capability
 set. Current `codex exec` adapter с `--skip-git-repo-check` и
 `--dangerously-bypass-approvals-and-sandbox` сохранён как явный unrestricted

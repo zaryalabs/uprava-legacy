@@ -37,6 +37,8 @@ const LINEAR_WORKLOAD_NAME: &str = "uprava-linear";
 const LINEAR_TOOL_NAMESPACE: &str = "linear";
 const TOOL_POLICY_VERSION: &str = "uprava-tool-policy-v1";
 const MCP_LEASE_TTL_MINUTES: i64 = 10;
+const MANAGED_MCP_LEASE_TTL_HOURS: i64 = 24;
+const MANAGED_MCP_LEASE_REFRESH_WINDOW_MINUTES: i64 = 5;
 const TOOL_SUMMARY_MAX_BYTES: usize = 2_048;
 const TOOL_SEARCH_CURSOR_TTL_SECONDS: i64 = 300;
 const EXTERNAL_TOOL_TIMEOUT: Duration = Duration::from_secs(35);
@@ -100,11 +102,9 @@ pub(crate) async fn register_tool_definitions(
 ) -> Result<(), AppError> {
     let now = Utc::now();
     let connection = state.pool.acquire().await?;
-    // Lease rotation reads the current credential version before revoking and
-    // inserting. A deferred SQLite transaction can lose that read snapshot to
-    // a concurrent command acknowledgement and fail with SQLITE_BUSY_SNAPSHOT.
-    // Acquire the write reservation up front so recovery/start paths serialize
-    // here and still honor the configured busy timeout.
+    // Definition replacement reads and rewrites multiple registry rows. Reserve
+    // the SQLite writer before that snapshot so concurrent registry refreshes
+    // cannot invalidate it with SQLITE_BUSY_SNAPSHOT.
     let mut transaction =
         sqlx::Transaction::begin(connection, Some("BEGIN IMMEDIATE".into())).await?;
     sqlx::query(
@@ -1796,7 +1796,31 @@ pub(crate) async fn issue_mcp_access_lease(
     session_id: &SessionThreadId,
     actor_ref: ActorRef,
 ) -> Result<(String, McpAccessLeaseClaims), AppError> {
-    issue_mcp_access_lease_with_state(state, session_id, actor_ref, None).await
+    issue_mcp_access_lease_with_state(
+        state,
+        session_id,
+        actor_ref,
+        None,
+        ChronoDuration::minutes(MCP_LEASE_TTL_MINUTES),
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn issue_managed_mcp_access_lease(
+    state: &AppState,
+    session_id: &SessionThreadId,
+    actor_ref: ActorRef,
+) -> Result<(String, McpAccessLeaseClaims), AppError> {
+    issue_mcp_access_lease_with_state(
+        state,
+        session_id,
+        actor_ref,
+        None,
+        ChronoDuration::hours(MANAGED_MCP_LEASE_TTL_HOURS),
+        true,
+    )
+    .await
 }
 
 pub(crate) async fn issue_mcp_access_lease_for_resume(
@@ -1810,6 +1834,8 @@ pub(crate) async fn issue_mcp_access_lease_for_resume(
         session_id,
         actor_ref,
         Some(resume_command_id.clone()),
+        ChronoDuration::hours(MANAGED_MCP_LEASE_TTL_HOURS),
+        true,
     )
     .await
 }
@@ -1819,6 +1845,8 @@ async fn issue_mcp_access_lease_with_state(
     session_id: &SessionThreadId,
     actor_ref: ActorRef,
     resume_command_id: Option<CommandId>,
+    ttl: ChronoDuration,
+    reuse_active: bool,
 ) -> Result<(String, McpAccessLeaseClaims), AppError> {
     if !tool_is_visible_to_actor(&actor_ref) {
         return Err(AppError::auth(
@@ -1834,8 +1862,40 @@ async fn issue_mcp_access_lease_with_state(
         ));
     }
     let now = Utc::now();
-    let expires_at = now + ChronoDuration::minutes(MCP_LEASE_TTL_MINUTES);
-    let mut transaction = state.pool.begin().await?;
+    if reuse_active && resume_command_id.is_none() {
+        let reusable_after =
+            now + ChronoDuration::minutes(MANAGED_MCP_LEASE_REFRESH_WINDOW_MINUTES);
+        let claims_json: Option<String> = sqlx::query_scalar(
+            r#"
+            select claims_json from mcp_access_leases
+            where session_thread_id = ?1 and revoked_at is null and expires_at > ?2
+            order by credential_version desc
+            limit 1
+            "#,
+        )
+        .bind(session_id.as_str())
+        .bind(reusable_after)
+        .fetch_optional(&state.pool)
+        .await?;
+        if let Some(claims_json) = claims_json {
+            let claims: McpAccessLeaseClaims = serde_json::from_str(&claims_json)?;
+            if claims.actor_ref == actor_ref {
+                let signature = sign_lease(state, claims_json.as_bytes())?;
+                return Ok((
+                    format!("{}.{}", claims.lease_id, encode_hex(&signature)),
+                    claims,
+                ));
+            }
+        }
+    }
+    let expires_at = now + ttl;
+    // Lease rotation reads the current credential version before revoking and
+    // inserting. A deferred SQLite transaction can lose that read snapshot to
+    // a concurrent rotation and fail with SQLITE_BUSY_SNAPSHOT. Reserve the
+    // writer up front; SQLite's configured busy timeout provides bounded wait.
+    let connection = state.pool.acquire().await?;
+    let mut transaction =
+        sqlx::Transaction::begin(connection, Some("BEGIN IMMEDIATE".into())).await?;
     let credential_version: i64 = sqlx::query_scalar(
         "select coalesce(max(credential_version), 0) + 1 from mcp_access_leases where session_thread_id = ?1",
     )
@@ -1893,14 +1953,14 @@ pub(crate) async fn validate_mcp_access_lease(
     let (lease_id, signature_hex) = token.split_once('.').ok_or_else(|| {
         tool_error(
             ToolExecutionErrorCode::NotAuthenticated,
-            "Invalid MCP lease",
+            "MCP lease token has an invalid format",
             false,
         )
     })?;
     let signature = decode_hex(signature_hex).ok_or_else(|| {
         tool_error(
             ToolExecutionErrorCode::NotAuthenticated,
-            "Invalid MCP lease",
+            "MCP lease signature encoding is invalid",
             false,
         )
     })?;
@@ -1911,7 +1971,13 @@ pub(crate) async fn validate_mcp_access_lease(
     .fetch_optional(&state.pool)
     .await
     .map_err(internal_tool_error)?
-    .ok_or_else(|| tool_error(ToolExecutionErrorCode::NotAuthenticated, "Invalid MCP lease", false))?;
+    .ok_or_else(|| {
+        tool_error(
+            ToolExecutionErrorCode::NotAuthenticated,
+            "MCP lease id is unknown",
+            false,
+        )
+    })?;
     if row
         .try_get::<Option<DateTime<Utc>>, _>("revoked_at")
         .map_err(internal_tool_error)?

@@ -30,6 +30,16 @@ impl NodeSupervisor {
     }
 
     pub(crate) async fn run(mut self) -> anyhow::Result<()> {
+        let run_result = tokio::select! {
+            result = self.run_loop() => result,
+            signal = wait_for_shutdown_signal() => signal,
+        };
+        let shutdown_result = self.shutdown().await;
+        run_result?;
+        shutdown_result
+    }
+
+    async fn run_loop(&mut self) -> anyhow::Result<()> {
         if let Err(error) =
             super::reconcile_task_runtime_mappings(&self.config, &self.client, &self.state_store)
                 .await
@@ -41,9 +51,7 @@ impl NodeSupervisor {
                 Ok(enrolled) => enrolled,
                 Err(error) => {
                     tracing::warn!(error = %error, "state store enrollment check failed");
-                    if self.sleep_or_shutdown().await? {
-                        break;
-                    }
+                    tokio::time::sleep(self.config.heartbeat_interval).await;
                     continue;
                 }
             };
@@ -55,16 +63,12 @@ impl NodeSupervisor {
                 {
                     Ok(true) => {}
                     Ok(false) => {
-                        if self.sleep_or_shutdown().await? {
-                            break;
-                        }
+                        tokio::time::sleep(self.config.heartbeat_interval).await;
                         continue;
                     }
                     Err(error) => {
                         tracing::warn!(error = %error, "enrollment step failed");
-                        if self.sleep_or_shutdown().await? {
-                            break;
-                        }
+                        tokio::time::sleep(self.config.heartbeat_interval).await;
                         continue;
                     }
                 }
@@ -125,20 +129,7 @@ impl NodeSupervisor {
                     }
                 }
             }
-            if self.sleep_or_shutdown().await? {
-                break;
-            }
-        }
-        Ok(())
-    }
-
-    async fn sleep_or_shutdown(&mut self) -> anyhow::Result<bool> {
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
-                self.shutdown().await?;
-                Ok(true)
-            }
-            _ = tokio::time::sleep(self.config.heartbeat_interval) => Ok(false),
+            tokio::time::sleep(self.config.heartbeat_interval).await;
         }
     }
 
@@ -152,4 +143,18 @@ impl NodeSupervisor {
         self.managed_supervisor.shutdown().await;
         self.state_store.shutdown().await
     }
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => result.map_err(Into::into),
+        _ = terminate.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
+    tokio::signal::ctrl_c().await.map_err(Into::into)
 }

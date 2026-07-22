@@ -37,13 +37,17 @@ Uprava должна стать control plane и рабочей поверхно�
 
 ## Текущее состояние
 
-Текущий baseline репозитория — `0.2.25`. Он закрывает Managed Agent Work Loop:
+Текущий baseline репозитория — `0.2.26`. Он доводит Managed Agent Work Loop до
+deployment-ready состояния:
 Managed является capability-aware default для новых Agent sessions, Core не
 переходит в unrestricted Exec молча, existing sessions сохраняют stored
 profile, а Jobs и Tasks остаются на отдельных execution contracts. Host-only
-acceptance проверяет safe policy, два Managed turn с detach/reattach,
-stop/resume и reload, а также явный Exec compatibility path. Provider child
-process получает только allowlisted environment. Baseline наследует Web work
+acceptance проверяет safe policy, approve/deny/input, interrupt, MCP, два
+Managed turn с detach/reattach, stop/resume и reload, а также явный Exec
+compatibility path. Managed MCP credential обновляется через native resume,
+idle expiry завершает Node process и отзывает lease, а workspace повторно
+проверяется на Node. Provider child process получает только allowlisted
+environment. Baseline наследует Web work
 surface `0.2.24`, Core orchestration `0.2.23`, Node-managed Codex runtime
 `0.2.22`, shared foundation `0.2.21`, protocol gate `0.2.20` и `0.2.19` с
 durable Task Runs, isolated Git worktrees, Docker/OpenSandbox lifecycle,
@@ -60,16 +64,13 @@ Extension Host и bundled Dark Theme, Agent Tooling,
 Git-aware Review, прозрачного live agent timeline, модульных Core/Node runtime
 boundaries, workspace-centered Web UI, Background Jobs и protocol v2.
 `V01` обозначает первый продуктовый срез, выпущенный как `0.1.0`. После него
-реализовано двадцать пять implementation slices, workspace-centered UI follow-up, единый
+реализовано двадцать шесть implementation slices, workspace-centered UI follow-up, единый
 hardening-аудит, renderer/PTY-срез workspace и первый baseline self-hosted
 CI/CD deployment и синхронизированными Linux visual baselines.
 
-Следующее runtime-направление — `16 Managed Agent Work Loop`: получить
-TUI-equivalent streaming, approvals, questions, interruption and resume через
-provider-native semantic protocol, не встраивая сам Codex TUI. Agent должен
-перейти на этот safe managed mode по умолчанию. Task Run сохраняет unrestricted
-`codex exec` внутри OpenSandbox, а целевой Job Run является sessionless
-sandboxed `codex exec` с non-interactive approval policy.
+Следующее крупное продуктовое направление — team/cloud model. Отдельным
+runtime follow-up остаётся sessionless sandboxed Job Run; Task Run сохраняет
+собственный OpenSandbox contract.
 
 Основные продуктовые и архитектурные документы:
 

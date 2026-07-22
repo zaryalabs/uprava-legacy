@@ -62,6 +62,7 @@ export type WorkbenchCommandContext = {
   session?: SessionSummary;
   runtime?: RuntimeSummary;
   turnContent?: string;
+  turnCollaborationMode?: "default" | "plan";
   approvalId?: string;
   approved?: boolean;
   providerInteractionId?: string;
@@ -282,7 +283,10 @@ const commands: UiCommand[] = [
       );
       return finishCommand(
         context,
-        coreApi.sendTurn(session.session_thread_id, { content }),
+        coreApi.sendTurn(session.session_thread_id, {
+          content,
+          collaboration_mode: context.turnCollaborationMode,
+        }),
       );
     },
   },

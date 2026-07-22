@@ -8,6 +8,10 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 const MANAGED_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(not(test))]
+const MANAGED_INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const MANAGED_INTERRUPT_TIMEOUT: Duration = Duration::from_millis(250);
 const MANAGED_COMMAND_QUEUE_CAPACITY: usize = 64;
 const MAX_MANAGED_PROTOCOL_BYTES: usize = 1024 * 1024;
 const MAX_MANAGED_PROMPT_CHARS: usize = 1200;
@@ -80,11 +84,14 @@ impl ManagedRuntimeError {
 #[derive(Clone, Default)]
 pub(crate) struct ManagedRuntimeSupervisor {
     sessions: Arc<Mutex<HashMap<String, Arc<Mutex<ManagedSession>>>>>,
+    interrupt_channels:
+        Arc<Mutex<HashMap<String, mpsc::Sender<mpsc::Sender<ManagedRuntimeUpdate>>>>>,
 }
 
 struct ManagedSession {
     attempt_id: RuntimeAttemptId,
     provider_thread_id: String,
+    provider_model: Option<String>,
     active_turn_id: Option<String>,
     pending: HashMap<String, PendingInteraction>,
     next_request_id: u64,
@@ -92,9 +99,11 @@ struct ManagedSession {
     child: tokio::process::Child,
     stderr_task: tokio::task::JoinHandle<()>,
     step_timeout: Duration,
+    workspace: String,
+    mcp_access_identity: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PendingInteraction {
     provider_request_id: serde_json::Value,
     kind: ProviderInteractionKind,
@@ -142,14 +151,17 @@ impl ManagedRuntimeSupervisor {
             ));
         }
         let mut session = ManagedSession::spawn(config, workspace, mcp_access).await?;
-        let provider_thread_id = if let Some(thread_id) = resume_thread_id {
+        let (provider_thread_id, provider_model) = if let Some(thread_id) = resume_thread_id {
             let response = session
                 .request(
                     "thread/resume",
                     serde_json::json!({ "threadId": thread_id }),
                 )
                 .await?;
-            required_provider_string(&response, &["thread", "id"])?
+            (
+                required_provider_string(&response, &["thread", "id"])?,
+                optional_provider_string(&response, &["model"]),
+            )
         } else {
             let response = session
                 .request(
@@ -164,9 +176,13 @@ impl ManagedRuntimeSupervisor {
                     }),
                 )
                 .await?;
-            required_provider_string(&response, &["thread", "id"])?
+            (
+                required_provider_string(&response, &["thread", "id"])?,
+                optional_provider_string(&response, &["model"]),
+            )
         };
         session.provider_thread_id.clone_from(&provider_thread_id);
+        session.provider_model = provider_model;
         let attempt_id = session.attempt_id.clone();
         self.sessions
             .lock()
@@ -188,9 +204,18 @@ impl ManagedRuntimeSupervisor {
         &self,
         runtime_id: &RuntimeSessionId,
         content: String,
+        collaboration_mode: Option<String>,
         cancellation: Option<watch::Receiver<bool>>,
     ) -> Result<ManagedOperation, ManagedRuntimeError> {
         let session = self.session(runtime_id).await?;
+        let runtime_key = runtime_id.to_string();
+        let interrupt_channels = self.interrupt_channels.clone();
+        let sessions = self.sessions.clone();
+        let (interrupt_tx, interrupt_rx) = mpsc::channel(1);
+        interrupt_channels
+            .lock()
+            .await
+            .insert(runtime_key.clone(), interrupt_tx);
         let (updates_tx, updates) = mpsc::channel(MANAGED_COMMAND_QUEUE_CAPACITY);
         tokio::spawn(async move {
             let mut session = session.lock().await;
@@ -201,17 +226,81 @@ impl ManagedRuntimeSupervisor {
                     "The managed runtime already has an active turn",
                 )
                 .await;
+                interrupt_channels.lock().await.remove(&runtime_key);
                 return;
             }
-            match session.start_turn(&content).await {
+            match session
+                .start_turn(&content, collaboration_mode.as_deref())
+                .await
+            {
                 Ok(()) => {
                     let _ = updates_tx.send(ManagedRuntimeUpdate::TurnStarted).await;
-                    session.drive_active_turn(updates_tx, cancellation).await;
+                    session
+                        .drive_active_turn(updates_tx, cancellation, interrupt_rx)
+                        .await;
                 }
                 Err(error) => send_managed_error(&updates_tx, error).await,
             }
+            let process_exited = session.child.try_wait().ok().flatten().is_some();
+            drop(session);
+            interrupt_channels.lock().await.remove(&runtime_key);
+            if process_exited {
+                sessions.lock().await.remove(&runtime_key);
+            }
         });
         Ok(ManagedOperation { updates })
+    }
+
+    pub(crate) async fn refresh_mcp_access(
+        &self,
+        config: &NodeConfig,
+        runtime_id: &RuntimeSessionId,
+        mcp_access: &ProviderMcpAccess,
+    ) -> Result<(), ManagedRuntimeError> {
+        let session = self.session(runtime_id).await?;
+        let mut current = session.lock().await;
+        let identity = managed_mcp_access_identity(mcp_access);
+        if current.mcp_access_identity.as_deref() == Some(identity.as_str()) {
+            return Ok(());
+        }
+        if current.active_turn_id.is_some() || !current.pending.is_empty() {
+            return Err(ManagedRuntimeError::new(
+                "provider.mcp_refresh_blocked",
+                "Managed MCP access cannot rotate while a turn or interaction is active",
+            ));
+        }
+        let attempt_id = current.attempt_id.clone();
+        let workspace = current.workspace.clone();
+        let thread_id = current.provider_thread_id.clone();
+        let mut replacement = ManagedSession::spawn(config, &workspace, Some(mcp_access)).await?;
+        let resumed = match replacement
+            .request(
+                "thread/resume",
+                serde_json::json!({ "threadId": thread_id }),
+            )
+            .await
+        {
+            Ok(response) => Ok((
+                required_provider_string(&response, &["thread", "id"])?,
+                optional_provider_string(&response, &["model"]),
+            )),
+            Err(error) => Err(error),
+        };
+        let resumed = match resumed {
+            Ok(resumed) => resumed,
+            Err(error) => {
+                terminate_provider_process(&mut replacement.child).await;
+                replacement.stderr_task.abort();
+                return Err(error);
+            }
+        };
+        replacement.attempt_id = attempt_id;
+        replacement.provider_thread_id = resumed.0;
+        replacement.provider_model = resumed.1;
+        terminate_provider_process(&mut current.child).await;
+        current.stderr_task.abort();
+        *current = replacement;
+        Ok(())
     }
 
     pub(crate) async fn resolve_approval(
@@ -221,17 +310,25 @@ impl ManagedRuntimeSupervisor {
         approved: bool,
     ) -> Result<ManagedOperation, ManagedRuntimeError> {
         let session = self.session(runtime_id).await?;
+        let runtime_key = runtime_id.to_string();
+        let interrupt_channels = self.interrupt_channels.clone();
+        let (interrupt_tx, interrupt_rx) = mpsc::channel(1);
+        interrupt_channels
+            .lock()
+            .await
+            .insert(runtime_key.clone(), interrupt_tx);
         let interaction_id = interaction_id.clone();
         let (updates_tx, updates) = mpsc::channel(MANAGED_COMMAND_QUEUE_CAPACITY);
         tokio::spawn(async move {
             let mut session = session.lock().await;
-            let Some(pending) = session.pending.remove(interaction_id.as_str()) else {
+            let Some(pending) = session.pending.get(interaction_id.as_str()).cloned() else {
                 send_managed_failure(
                     &updates_tx,
                     "provider.interaction_terminal_conflict",
                     "The provider interaction is no longer pending",
                 )
                 .await;
+                interrupt_channels.lock().await.remove(&runtime_key);
                 return;
             };
             if pending.kind != ProviderInteractionKind::Approval {
@@ -241,6 +338,7 @@ impl ManagedRuntimeSupervisor {
                     "The provider interaction is not an approval",
                 )
                 .await;
+                interrupt_channels.lock().await.remove(&runtime_key);
                 return;
             }
             let result = serde_json::json!({
@@ -248,8 +346,10 @@ impl ManagedRuntimeSupervisor {
             });
             if let Err(error) = session.respond(pending.provider_request_id, result).await {
                 send_managed_error(&updates_tx, error).await;
+                interrupt_channels.lock().await.remove(&runtime_key);
                 return;
             }
+            session.pending.remove(interaction_id.as_str());
             let _ = updates_tx
                 .send(ManagedRuntimeUpdate::InteractionResolved {
                     interaction_id,
@@ -258,7 +358,10 @@ impl ManagedRuntimeSupervisor {
                     answers: vec![],
                 })
                 .await;
-            session.drive_active_turn(updates_tx, None).await;
+            session
+                .drive_active_turn(updates_tx, None, interrupt_rx)
+                .await;
+            interrupt_channels.lock().await.remove(&runtime_key);
         });
         Ok(ManagedOperation { updates })
     }
@@ -276,6 +379,13 @@ impl ManagedRuntimeSupervisor {
             ));
         }
         let session = self.session(runtime_id).await?;
+        let runtime_key = runtime_id.to_string();
+        let interrupt_channels = self.interrupt_channels.clone();
+        let (interrupt_tx, interrupt_rx) = mpsc::channel(1);
+        interrupt_channels
+            .lock()
+            .await
+            .insert(runtime_key.clone(), interrupt_tx);
         let interaction_id = interaction_id.clone();
         let answers = answers
             .iter()
@@ -284,13 +394,14 @@ impl ManagedRuntimeSupervisor {
         let (updates_tx, updates) = mpsc::channel(MANAGED_COMMAND_QUEUE_CAPACITY);
         tokio::spawn(async move {
             let mut session = session.lock().await;
-            let Some(pending) = session.pending.remove(interaction_id.as_str()) else {
+            let Some(pending) = session.pending.get(interaction_id.as_str()).cloned() else {
                 send_managed_failure(
                     &updates_tx,
                     "provider.interaction_terminal_conflict",
                     "The provider interaction is no longer pending",
                 )
                 .await;
+                interrupt_channels.lock().await.remove(&runtime_key);
                 return;
             };
             if pending.kind != ProviderInteractionKind::UserInput {
@@ -300,6 +411,7 @@ impl ManagedRuntimeSupervisor {
                     "The provider interaction is not a user-input request",
                 )
                 .await;
+                interrupt_channels.lock().await.remove(&runtime_key);
                 return;
             }
             let mut provider_answers = serde_json::Map::new();
@@ -322,8 +434,10 @@ impl ManagedRuntimeSupervisor {
                 .await
             {
                 send_managed_error(&updates_tx, error).await;
+                interrupt_channels.lock().await.remove(&runtime_key);
                 return;
             }
+            session.pending.remove(interaction_id.as_str());
             let _ = updates_tx
                 .send(ManagedRuntimeUpdate::InteractionResolved {
                     interaction_id,
@@ -332,7 +446,10 @@ impl ManagedRuntimeSupervisor {
                     answers,
                 })
                 .await;
-            session.drive_active_turn(updates_tx, None).await;
+            session
+                .drive_active_turn(updates_tx, None, interrupt_rx)
+                .await;
+            interrupt_channels.lock().await.remove(&runtime_key);
         });
         Ok(ManagedOperation { updates })
     }
@@ -341,18 +458,44 @@ impl ManagedRuntimeSupervisor {
         &self,
         runtime_id: &RuntimeSessionId,
     ) -> Result<ManagedOperation, ManagedRuntimeError> {
-        let session = self.session(runtime_id).await?;
+        let interrupt = self
+            .interrupt_channels
+            .lock()
+            .await
+            .get(runtime_id.as_str())
+            .cloned()
+            .ok_or_else(|| {
+                ManagedRuntimeError::new(
+                    "provider.no_active_turn",
+                    "The managed runtime has no active turn",
+                )
+            })?;
         let (updates_tx, updates) = mpsc::channel(MANAGED_COMMAND_QUEUE_CAPACITY);
         tokio::spawn(async move {
-            let mut session = session.lock().await;
-            if let Err(error) = session.interrupt_active_turn().await {
-                if error.code == "provider.no_active_turn" {
-                    return;
+            match timeout(
+                MANAGED_INTERRUPT_TIMEOUT,
+                interrupt.send(updates_tx.clone()),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    send_managed_failure(
+                        &updates_tx,
+                        "provider.no_active_turn",
+                        "The managed turn ended before interrupt was delivered",
+                    )
+                    .await;
                 }
-                send_managed_error(&updates_tx, error).await;
-                return;
+                Err(_) => {
+                    send_managed_failure(
+                        &updates_tx,
+                        "provider.interrupt_dispatch_timeout",
+                        "Timed out delivering interrupt to the active managed turn",
+                    )
+                    .await;
+                }
             }
-            session.drive_active_turn(updates_tx, None).await;
         });
         Ok(ManagedOperation { updates })
     }
@@ -361,6 +504,20 @@ impl ManagedRuntimeSupervisor {
         &self,
         runtime_id: &RuntimeSessionId,
     ) -> Result<ManagedAttemptDescriptor, ManagedRuntimeError> {
+        if let Some(interrupt) = self
+            .interrupt_channels
+            .lock()
+            .await
+            .remove(runtime_id.as_str())
+        {
+            let (terminal_tx, mut terminal_rx) = mpsc::channel(1);
+            let _ = interrupt.send(terminal_tx).await;
+            let _ = timeout(
+                MANAGED_INTERRUPT_TIMEOUT + Duration::from_secs(1),
+                terminal_rx.recv(),
+            )
+            .await;
+        }
         let Some(session) = self.sessions.lock().await.remove(runtime_id.as_str()) else {
             return Err(ManagedRuntimeError::new(
                 "provider.managed_not_running",
@@ -522,6 +679,7 @@ impl ManagedSession {
         let mut session = Self {
             attempt_id: RuntimeAttemptId::from(format!("attempt-{}", Uuid::new_v4())),
             provider_thread_id: String::new(),
+            provider_model: None,
             active_turn_id: None,
             pending: HashMap::new(),
             next_request_id: 1,
@@ -529,6 +687,8 @@ impl ManagedSession {
             child,
             stderr_task,
             step_timeout: config.codex_timeout,
+            workspace: workspace.to_owned(),
+            mcp_access_identity: mcp_access.map(managed_mcp_access_identity),
         };
         session
             .request(
@@ -545,16 +705,30 @@ impl ManagedSession {
         Ok(session)
     }
 
-    async fn start_turn(&mut self, content: &str) -> Result<(), ManagedRuntimeError> {
-        let response = self
-            .request(
-                "turn/start",
-                serde_json::json!({
-                    "threadId": self.provider_thread_id,
-                    "input": [{ "type": "text", "text": content }]
-                }),
+    async fn start_turn(
+        &mut self,
+        content: &str,
+        collaboration_mode: Option<&str>,
+    ) -> Result<(), ManagedRuntimeError> {
+        let mut params = serde_json::json!({
+            "threadId": self.provider_thread_id,
+            "input": [{ "type": "text", "text": content }]
+        });
+        let model = self.provider_model.as_deref().ok_or_else(|| {
+            ManagedRuntimeError::new(
+                "provider.managed_model_missing",
+                "Codex did not advertise the model required for collaboration mode",
             )
-            .await?;
+        })?;
+        params["collaborationMode"] = serde_json::json!({
+            "mode": collaboration_mode.unwrap_or("default"),
+            "settings": {
+                "model": model,
+                "reasoning_effort": null,
+                "developer_instructions": null
+            }
+        });
+        let response = self.request("turn/start", params).await?;
         self.active_turn_id = Some(required_provider_string(&response, &["turn", "id"])?);
         Ok(())
     }
@@ -563,10 +737,38 @@ impl ManagedSession {
         &mut self,
         updates: mpsc::Sender<ManagedRuntimeUpdate>,
         mut cancellation: Option<watch::Receiver<bool>>,
+        mut interrupt_requests: mpsc::Receiver<mpsc::Sender<ManagedRuntimeUpdate>>,
     ) {
+        let mut interrupt_waiter = None;
         loop {
             let next = tokio::select! {
                 message = self.next_json() => message,
+                request = interrupt_requests.recv() => {
+                    let Some(request) = request else {
+                        continue;
+                    };
+                    match self.interrupt_active_turn().await {
+                        Ok(()) => {
+                            interrupt_waiter = Some(request);
+                            continue;
+                        }
+                        Err(error) => {
+                            terminate_provider_process(&mut self.child).await;
+                            self.stderr_task.abort();
+                            self.active_turn_id = None;
+                            self.pending.clear();
+                            let escalated = ManagedRuntimeUpdate::Failed {
+                                code: "provider.interrupt_escalated",
+                                message: format!(
+                                    "Codex did not confirm interrupt; the provider process was terminated: {}",
+                                    error.message
+                                ),
+                            };
+                            let _ = request.send(escalated).await;
+                            return;
+                        }
+                    }
+                },
                 _ = wait_for_runtime_cancellation(&mut cancellation), if cancellation.is_some() => {
                     if let Err(error) = self.interrupt_active_turn().await {
                         send_managed_error(&updates, error).await;
@@ -600,6 +802,35 @@ impl ManagedSession {
                 .get("method")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
+            if message.get("id").is_some() && !method.is_empty() {
+                let _ = self
+                    .respond_error(
+                        message["id"].clone(),
+                        "Provider callback is not supported by the managed runtime",
+                    )
+                    .await;
+                terminate_provider_process(&mut self.child).await;
+                self.stderr_task.abort();
+                self.active_turn_id = None;
+                self.pending.clear();
+                let callback_mode = message["params"]["mode"]
+                    .as_str()
+                    .map(|value| bounded_text(value, 64))
+                    .unwrap_or_else(|| "unspecified".to_owned());
+                let callback_message = message["params"]["message"]
+                    .as_str()
+                    .map(|value| bounded_text(value, 512))
+                    .unwrap_or_else(|| "No callback message supplied".to_owned());
+                send_managed_failure(
+                    &updates,
+                    "provider.managed_callback_unsupported",
+                    format!(
+                        "Codex requested unsupported callback `{method}` ({callback_mode}): {callback_message}"
+                    ),
+                )
+                .await;
+                return;
+            }
             if method == "item/agentMessage/delta" {
                 if let Some(delta) =
                     first_json_string_for_keys(&message["params"], &["delta", "text", "content"])
@@ -642,7 +873,11 @@ impl ManagedSession {
                         message: format!("Codex managed turn finished with status {status}"),
                     }
                 };
-                let _ = updates.send(update).await;
+                if let Some(waiter) = interrupt_waiter.take() {
+                    let _ = waiter.send(update).await;
+                } else {
+                    let _ = updates.send(update).await;
+                }
                 return;
             }
             if !method.is_empty() {
@@ -719,15 +954,16 @@ impl ManagedSession {
                 "The managed runtime has no active turn",
             )
         })?;
-        self.pending.clear();
-        self.request(
+        self.request_with_timeout(
             "turn/interrupt",
             serde_json::json!({
                 "threadId": self.provider_thread_id,
                 "turnId": turn_id,
             }),
+            MANAGED_INTERRUPT_TIMEOUT,
         )
         .await?;
+        self.pending.clear();
         Ok(())
     }
 
@@ -741,11 +977,21 @@ impl ManagedSession {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ManagedRuntimeError> {
+        self.request_with_timeout(method, params, self.step_timeout)
+            .await
+    }
+
+    async fn request_with_timeout(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        request_timeout: Duration,
+    ) -> Result<serde_json::Value, ManagedRuntimeError> {
         let id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
         self.send_json(&serde_json::json!({ "id": id, "method": method, "params": params }))
             .await?;
-        timeout(self.step_timeout, async {
+        timeout(request_timeout, async {
             loop {
                 let message = self.next_json().await?;
                 if message["id"] == id {
@@ -877,6 +1123,14 @@ impl ManagedSession {
     }
 }
 
+fn managed_mcp_access_identity(access: &ProviderMcpAccess) -> String {
+    format!(
+        "{}|{}",
+        access.endpoint_url,
+        access.access_token.expose_secret()
+    )
+}
+
 async fn send_managed_error(
     sender: &mpsc::Sender<ManagedRuntimeUpdate>,
     error: ManagedRuntimeError,
@@ -955,6 +1209,17 @@ fn required_provider_string(
                 "Codex response identity was not a string",
             )
         })
+}
+
+fn optional_provider_string(value: &serde_json::Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| bounded_text(value, 512))
 }
 
 fn bounded_provider_payload(value: &serde_json::Value, diagnostic_only: bool) -> serde_json::Value {
@@ -1222,7 +1487,7 @@ mod tests {
         for prompt in ["first", "second"] {
             let updates = collect_updates(
                 supervisor
-                    .send_turn(&runtime_id, prompt.to_owned(), None)
+                    .send_turn(&runtime_id, prompt.to_owned(), None, None)
                     .await
                     .expect("turn starts"),
             )
@@ -1232,9 +1497,26 @@ mod tests {
                 .any(|update| matches!(update, ManagedRuntimeUpdate::TurnCompleted)));
         }
 
+        let access = ProviderMcpAccess {
+            endpoint_url: "http://127.0.0.1:8080/api/v1/mcp".to_owned(),
+            access_token: uprava_protocol::McpAccessToken::new("managed-lease-rotated"),
+            expires_at: Utc::now() + chrono::Duration::hours(1),
+        };
+        supervisor
+            .refresh_mcp_access(&config, &runtime_id, &access)
+            .await
+            .expect("managed MCP rotation resumes the provider thread");
+        assert_eq!(
+            supervisor.inspect(&runtime_id).await,
+            Some((
+                descriptor.runtime_attempt_id.clone(),
+                "thread-fake-1".to_owned()
+            ))
+        );
+
         let approval_updates = collect_updates(
             supervisor
-                .send_turn(&runtime_id, "approval".to_owned(), None)
+                .send_turn(&runtime_id, "approval".to_owned(), None, None)
                 .await
                 .expect("approval turn starts"),
         )
@@ -1261,9 +1543,50 @@ mod tests {
             .iter()
             .any(|update| matches!(update, ManagedRuntimeUpdate::TurnCompleted)));
 
+        let denied_updates = collect_updates(
+            supervisor
+                .send_turn(&runtime_id, "approval".to_owned(), None, None)
+                .await
+                .expect("denial turn starts"),
+        )
+        .await;
+        let denied_id = denied_updates
+            .iter()
+            .find_map(|update| match update {
+                ManagedRuntimeUpdate::InteractionRequested {
+                    interaction_id,
+                    kind: ProviderInteractionKind::Approval,
+                    ..
+                } => Some(interaction_id.clone()),
+                _ => None,
+            })
+            .expect("denial approval request is normalized");
+        let denied = collect_updates(
+            supervisor
+                .resolve_approval(&runtime_id, &denied_id, false)
+                .await
+                .expect("approval denial resolves"),
+        )
+        .await;
+        assert!(denied.iter().any(|update| matches!(
+            update,
+            ManagedRuntimeUpdate::InteractionResolved {
+                approved: Some(false),
+                ..
+            }
+        )));
+        assert!(denied
+            .iter()
+            .any(|update| matches!(update, ManagedRuntimeUpdate::TurnCompleted)));
+
         let input_updates = collect_updates(
             supervisor
-                .send_turn(&runtime_id, "input".to_owned(), None)
+                .send_turn(
+                    &runtime_id,
+                    "input".to_owned(),
+                    Some("plan".to_owned()),
+                    None,
+                )
                 .await
                 .expect("input turn starts"),
         )
@@ -1290,8 +1613,105 @@ mod tests {
             .iter()
             .any(|update| matches!(update, ManagedRuntimeUpdate::TurnCompleted)));
 
+        let active_operation = supervisor
+            .send_turn(&runtime_id, "interrupt".to_owned(), None, None)
+            .await
+            .expect("interruptible turn starts");
+        let active_updates = tokio::spawn(collect_updates(active_operation));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let interrupted = collect_updates(
+            supervisor
+                .interrupt(&runtime_id)
+                .await
+                .expect("interrupt dispatches without waiting for the session mutex"),
+        )
+        .await;
+        assert!(interrupted
+            .iter()
+            .any(|update| matches!(update, ManagedRuntimeUpdate::TurnInterrupted)));
+        let active_updates = active_updates.await.expect("active update task joins");
+        assert!(active_updates
+            .iter()
+            .any(|update| matches!(update, ManagedRuntimeUpdate::TurnStarted)));
+        assert!(!active_updates
+            .iter()
+            .any(|update| matches!(update, ManagedRuntimeUpdate::TurnInterrupted)));
+
         let stopped = supervisor.stop(&runtime_id).await.expect("runtime stops");
         assert_eq!(stopped.state, RuntimeAttemptState::Stopped);
+
+        supervisor
+            .start(
+                &config,
+                &runtime_id,
+                &workspace,
+                &policy,
+                &policy_hash,
+                Some("thread-fake-1"),
+                None,
+            )
+            .await
+            .expect("managed fake restarts for unsupported callback coverage");
+        let unsupported = collect_updates(
+            supervisor
+                .send_turn(&runtime_id, "unsupported-callback".to_owned(), None, None)
+                .await
+                .expect("unsupported callback turn starts"),
+        )
+        .await;
+        assert!(unsupported.iter().any(|update| matches!(
+            update,
+            ManagedRuntimeUpdate::Failed {
+                code: "provider.managed_callback_unsupported",
+                ..
+            }
+        )));
+        assert!(supervisor.inspect(&runtime_id).await.is_none());
+
+        supervisor
+            .start(
+                &config,
+                &runtime_id,
+                &workspace,
+                &policy,
+                &policy_hash,
+                Some("thread-fake-1"),
+                None,
+            )
+            .await
+            .expect("managed fake restarts for interrupt escalation");
+        let hanging_operation = supervisor
+            .send_turn(&runtime_id, "interrupt-timeout".to_owned(), None, None)
+            .await
+            .expect("hanging turn starts");
+        let hanging_updates = tokio::spawn(collect_updates(hanging_operation));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let escalated = collect_updates(
+            supervisor
+                .interrupt(&runtime_id)
+                .await
+                .expect("interrupt request reaches the hanging provider"),
+        )
+        .await;
+        assert!(escalated.iter().any(|update| matches!(
+            update,
+            ManagedRuntimeUpdate::Failed {
+                code: "provider.interrupt_escalated",
+                ..
+            }
+        )));
+        let hanging_updates = hanging_updates.await.expect("hanging update task joins");
+        assert!(hanging_updates
+            .iter()
+            .any(|update| matches!(update, ManagedRuntimeUpdate::TurnStarted)));
+        assert!(!hanging_updates.iter().any(|update| matches!(
+            update,
+            ManagedRuntimeUpdate::Failed {
+                code: "provider.interrupt_escalated",
+                ..
+            }
+        )));
+        assert!(supervisor.inspect(&runtime_id).await.is_none());
         std::fs::remove_file(script).expect("fake provider script removes");
     }
 
@@ -1372,6 +1792,7 @@ UPRAVA_FAKE_APP_SERVER_ENDPOINT="$endpoint" exec '{}' --exact runtime::managed_p
             .await
             .expect("fake websocket accepts");
         let mut turn = 0u64;
+        let mut interrupt_hangs = false;
         while let Some(Ok(WsMessage::Text(text))) = socket.next().await {
             let message: serde_json::Value =
                 serde_json::from_str(&text).expect("fake request is JSON");
@@ -1394,7 +1815,13 @@ UPRAVA_FAKE_APP_SERVER_ENDPOINT="$endpoint" exec '{}' --exact runtime::managed_p
                 "thread/start" | "thread/resume" => {
                     send_fake(
                         &mut socket,
-                        serde_json::json!({ "id": id, "result": { "thread": { "id": "thread-fake-1" } } }),
+                        serde_json::json!({
+                            "id": id,
+                            "result": {
+                                "thread": { "id": "thread-fake-1" },
+                                "model": "fake-model"
+                            }
+                        }),
                     )
                     .await;
                 }
@@ -1404,6 +1831,16 @@ UPRAVA_FAKE_APP_SERVER_ENDPOINT="$endpoint" exec '{}' --exact runtime::managed_p
                     let prompt = message["params"]["input"][0]["text"]
                         .as_str()
                         .unwrap_or_default();
+                    if prompt == "input" {
+                        assert_eq!(message["params"]["collaborationMode"]["mode"], "plan");
+                        assert_eq!(
+                            message["params"]["collaborationMode"]["settings"]["model"],
+                            "fake-model"
+                        );
+                    } else {
+                        assert_eq!(message["params"]["collaborationMode"]["mode"], "default");
+                    }
+                    interrupt_hangs = prompt == "interrupt-timeout";
                     send_fake(
                         &mut socket,
                         serde_json::json!({ "id": id, "result": { "turn": { "id": turn_id } } }),
@@ -1434,11 +1871,24 @@ UPRAVA_FAKE_APP_SERVER_ENDPOINT="$endpoint" exec '{}' --exact runtime::managed_p
                             }),
                         )
                         .await;
-                    } else {
+                    } else if prompt == "unsupported-callback" {
+                        send_fake(
+                            &mut socket,
+                            serde_json::json!({
+                                "id": 900 + turn,
+                                "method": "mcpServer/elicitation/request",
+                                "params": { "serverName": "uprava" }
+                            }),
+                        )
+                        .await;
+                    } else if !matches!(prompt, "interrupt" | "interrupt-timeout") {
                         complete_fake_turn(&mut socket, turn).await;
                     }
                 }
                 "turn/interrupt" => {
+                    if interrupt_hangs {
+                        continue;
+                    }
                     send_fake(&mut socket, serde_json::json!({ "id": id, "result": {} })).await;
                     send_fake(
                         &mut socket,
