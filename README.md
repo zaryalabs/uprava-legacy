@@ -37,21 +37,16 @@ Uprava должна стать control plane и рабочей поверхно�
 
 ## Текущее состояние
 
-Текущий baseline репозитория — `0.2.24`. Он добавляет Agent Web work surface
-для Managed Agent Work Loop: явный выбор профиля и policy preview до старта,
-semantic live timeline, typed approval/question cards, capability-aware
-lifecycle и постоянные policy/recovery diagnostics. Baseline наследует Core
-orchestration `0.2.23` с immutable admission, атомарным interaction lifecycle,
-ordered projection и actual-state reconnect, а также Node-managed Codex
-runtime `0.2.22`: process-per-attempt app-server v2, двусторонний semantic
-stream, approvals/user input, native interrupt, stop, provider resume reference,
-bounded normalization и explicit restart recovery.
-Managed capabilities теперь объявляются на Node при доступном Codex binary с
-распознанной совместимой версией, но
-Managed mode теперь доступен как явный opt-in, но остаётся не default до
-real-provider release gate. Baseline наследует `0.2.21` с shared contracts, persistence and policy
-foundation, `0.2.20` с protocol gate и `0.2.19` с durable Task Runs, isolated Git
-worktrees, Docker/OpenSandbox lifecycle,
+Текущий baseline репозитория — `0.2.25`. Он закрывает Managed Agent Work Loop:
+Managed является capability-aware default для новых Agent sessions, Core не
+переходит в unrestricted Exec молча, existing sessions сохраняют stored
+profile, а Jobs и Tasks остаются на отдельных execution contracts. Host-only
+acceptance проверяет safe policy, два Managed turn с detach/reattach,
+stop/resume и reload, а также явный Exec compatibility path. Provider child
+process получает только allowlisted environment. Baseline наследует Web work
+surface `0.2.24`, Core orchestration `0.2.23`, Node-managed Codex runtime
+`0.2.22`, shared foundation `0.2.21`, protocol gate `0.2.20` и `0.2.19` с
+durable Task Runs, isolated Git worktrees, Docker/OpenSandbox lifecycle,
 bounded checks/evidence, cancellation/recovery и отдельная Tasks surface.
 Persistent Codex credential profile и OpenSandbox API key намеренно отложены
 до ручной acceptance-проверки. Baseline также включает opt-in Dynamic UI from
@@ -65,7 +60,7 @@ Extension Host и bundled Dark Theme, Agent Tooling,
 Git-aware Review, прозрачного live agent timeline, модульных Core/Node runtime
 boundaries, workspace-centered Web UI, Background Jobs и protocol v2.
 `V01` обозначает первый продуктовый срез, выпущенный как `0.1.0`. После него
-реализовано двадцать два implementation slice, workspace-centered UI follow-up, единый
+реализовано двадцать пять implementation slices, workspace-centered UI follow-up, единый
 hardening-аудит, renderer/PTY-срез workspace и первый baseline self-hosted
 CI/CD deployment и синхронизированными Linux visual baselines.
 
@@ -84,6 +79,7 @@ sandboxed `codex exec` с non-interactive approval policy.
 - [Системные направления](docs/systems/areas/)
 - [Task-based Sandbox Runtime](docs/systems/areas/013-task-based-sandbox-runtime.md)
 - [Task Sandbox Runtime Runbook](docs/runbooks/task-sandbox-runtime.md)
+- [Managed Agent Runtime Runbook](docs/runbooks/managed-agent-runtime.md)
 - [Версионирование](docs/versioning.md)
 - [Релизы](docs/releases.md)
 - [Очередь фич](docs/product/feature-queue.md)

@@ -442,6 +442,7 @@ impl ManagedSession {
     ) -> Result<Self, ManagedRuntimeError> {
         let endpoint = available_managed_endpoint()?;
         let mut command = TokioCommand::new(&config.codex_binary);
+        configure_provider_environment(&mut command);
         command
             .arg("app-server")
             .arg("--listen")

@@ -2,7 +2,7 @@
 
 Статус: `active`
 
-Current release baseline: `0.2.24`.
+Current release baseline: `0.2.25`.
 
 Этот ledger фиксирует implementation baselines. Он не заменяет
 [`feature-queue.md`](product/feature-queue.md), где остается ранжированная очередь
@@ -45,20 +45,21 @@ future work.
 | `0.2.21` | 2026-07-22 | shipped | Managed Agent Work Loop stage 1: shared profiles/attempts/interactions, immutable effective policy/hash, migration 18, Rust/Web fixtures и typed capability admission без fallback |
 | `0.2.22` | 2026-07-22 | shipped | Managed Agent Work Loop stage 2: Node-owned Codex app-server supervisor, live semantic stream, interactions, interrupt/stop, resume descriptors и restart reconciliation |
 | `0.2.23` | 2026-07-22 | shipped | Managed Agent Work Loop stage 3: Core policy preview/admission, durable interaction state machine, ordered projection, actual-state reconnect, recovery audit и metrics |
-| `0.2.24` | 2026-07-22 | current | Managed Agent Work Loop stage 4: explicit profile/policy start UX, semantic timeline, typed interaction cards, runtime diagnostics и capability-aware lifecycle |
+| `0.2.24` | 2026-07-22 | shipped | Managed Agent Work Loop stage 4: explicit profile/policy start UX, semantic timeline, typed interaction cards, runtime diagnostics и capability-aware lifecycle |
+| `0.2.25` | 2026-07-22 | current | Managed Agent Work Loop stage 5: recovery/acceptance gate, capability-aware Managed default, explicit compatibility isolation и provider environment allowlist |
 
 ## Current Baseline
 
-`0.2.24` включает baseline `0.2.23`, protocol-v2 baseline `0.2.0`, завершённое Zarya 0.1 Web UI/UX
+`0.2.25` включает baseline `0.2.24`, protocol-v2 baseline `0.2.0`, завершённое Zarya 0.1 Web UI/UX
 alignment и clean-bootstrap four-phase delivery path. Текущая реализация включает
 первый working distributed
-control panel, двадцать четыре implementation slice после `0.1.0`, unified audit
+control panel, двадцать пять implementation slices после `0.1.0`, unified audit
 hardening slice и workspace
 renderer/PTY terminal layer, а также первый deployable self-hosted release path:
 
-- Start Agent явно передаёт `managed` или `exec_compatibility`, показывает
-  target Node/workspace и effective policy preview; compatibility остаётся
-  opt-in-slice default и требует отдельного unrestricted acknowledgement;
+- Start Agent выбирает Managed по умолчанию на capable Node, показывает target
+  Node/workspace и effective policy preview; compatibility остаётся явным
+  выбором и требует отдельного unrestricted acknowledgement;
 - Agent surface постоянно показывает execution profile, sandbox/approval
   policy, policy hash, provider/driver version, current attempt, recovery и
   last activity; compatibility имеет persistent unsafe warning;
@@ -96,16 +97,21 @@ renderer/PTY terminal layer, а также первый deployable self-hosted r
   projection и attempt/interaction lifecycle через migration 18;
 - Core допускает managed start только при полном наборе раздельных Node
   capabilities и возвращает typed unavailable reason без Exec fallback;
-  отсутствие profile и existing sessions остаются `exec_compatibility`, а Jobs
-  продолжают выбирать этот profile явно;
+  отсутствие profile выбирает Managed, existing sessions сохраняют stored
+  profile, а Jobs продолжают выбирать `exec_compatibility` явно;
 - provider protocol gate для Managed Agent Work Loop выбирает experimental
   Codex app-server v2 из `codex-cli 0.144.1` over loopback WebSocket;
   disposable Rust probe подтверждает два live turns, typed activity,
   approval/input continuation, interrupt, reconnect/resume, safe/unrestricted
   policy echo, Uprava-shaped MCP bearer boundary and process recovery;
 - каноническая модель разделяет Core-owned `SessionThread`/`RuntimeSession` и
-  Node-owned process-per-attempt `RuntimeAttempt`. Node driver реализован, но
-  Managed mode ещё не включён по умолчанию; `0.2.24` закрывает stages 0–4;
+  Node-owned process-per-attempt `RuntimeAttempt`; `0.2.25` закрывает stages
+  0–5, ограничивает provider child environment allowlist и добавляет host-only
+  acceptance для Managed default, recovery и explicit compatibility;
+- RuntimeStopped атомарно закрывает current attempt и pending interactions;
+  Managed resume получает MCP lease, scoped к non-terminal Resume command, а
+  SQLite lease/event writes резервируют writer до read snapshot, не оставляя
+  recovery или compatibility runtime без terminal projection;
 
 - Core хранит отдельный `TaskRun` и dispatch-ит его на capability-compatible
   Node без создания interactive session; Node создаёт linked Git worktree,

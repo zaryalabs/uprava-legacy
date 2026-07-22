@@ -1,6 +1,6 @@
 # План реализации feature 16: Managed Agent Work Loop
 
-Статус: `in-progress` — этапы 0–4 поставлены в `0.2.20`–`0.2.24`
+Статус: `completed` — этапы 0–5 поставлены в `0.2.20`–`0.2.25`
 
 Целевой delivery range: после implementation baseline `0.2.19`; фича может
 занять несколько последовательных SemVer slices. Точные версии назначаются при
@@ -758,6 +758,12 @@ layouts used for unblock decisions.
   blocked paths.
 
 ## Этап 5. Recovery, rollout and release closure
+
+Статус: `completed` в implementation baseline `0.2.25`. Managed является
+capability-aware default новых Agent sessions; missing profile не включает
+Exec fallback, existing sessions сохраняют stored profile, Jobs и Tasks не
+меняют contract. Recovery matrix, diagnostics и real-host acceptance описаны в
+[`Managed Agent Runtime`](../runbooks/managed-agent-runtime.md).
 
 ### Цель
 

@@ -327,7 +327,7 @@ async fn second_session_on_same_workspace_is_allowed_and_warns() {
             project_placement_id: first_detail.placement.project_placement_id,
             title: Some("Second session".to_owned()),
             provider: "codex".to_owned(),
-            execution_profile: None,
+            execution_profile: Some(AgentExecutionProfile::ExecCompatibility),
             force: false,
         }),
     )
@@ -430,7 +430,7 @@ async fn create_session_rejects_missing_provider_capability_without_recording_co
             project_placement_id: placement.project_placement_id,
             title: Some("Unsupported session".to_owned()),
             provider: "opencode".to_owned(),
-            execution_profile: None,
+            execution_profile: Some(AgentExecutionProfile::ExecCompatibility),
             force: false,
         }),
     )

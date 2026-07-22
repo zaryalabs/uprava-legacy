@@ -30,10 +30,12 @@ export function StartSessionControl({
   const location = useLocation();
   const queryClient = useQueryClient();
   const [provider, setProvider] = useState<ProviderId>("codex");
-  const [executionProfile, setExecutionProfile] =
-    useState<AgentExecutionProfile>("exec_compatibility");
+  const [profileSelection, setProfileSelection] =
+    useState<AgentExecutionProfile | null>(null);
   const [unsafeAcknowledged, setUnsafeAcknowledged] = useState(false);
   const [force, setForce] = useState(false);
+  const executionProfile =
+    profileSelection ?? defaultExecutionProfile(node, provider);
   const mutation = useMutation({
     mutationFn: () =>
       runWorkbenchCommand("session.start", {
@@ -112,7 +114,11 @@ export function StartSessionControl({
                   ? "bg-[var(--color-ink)] px-2 py-2 text-xs font-medium text-[var(--color-inverse)] disabled:bg-[var(--color-muted)]"
                   : "px-2 py-2 text-xs font-medium hover:bg-[var(--color-bg-muted)] disabled:text-[var(--color-muted)]"
               }
-              onClick={() => setProvider(option.id)}
+              onClick={() => {
+                setProvider(option.id);
+                setProfileSelection(null);
+                setUnsafeAcknowledged(false);
+              }}
             >
               {option.label}
             </button>
@@ -139,7 +145,7 @@ export function StartSessionControl({
                 checked={executionProfile === option.id}
                 disabled={!option.available || mutation.isPending}
                 onChange={() => {
-                  setExecutionProfile(option.id);
+                  setProfileSelection(option.id);
                   setUnsafeAcknowledged(false);
                 }}
               />
@@ -308,6 +314,17 @@ export function executionProfileOptions(
         compatibility?.unavailable_reason ?? "capability_not_reported",
     },
   ];
+}
+
+export function defaultExecutionProfile(
+  node: NodeSummary | undefined,
+  provider: ProviderId,
+): AgentExecutionProfile {
+  const managed = providerProfileCapability(
+    node,
+    `provider.${provider}.managed`,
+  );
+  return managed?.available ? "managed" : "exec_compatibility";
 }
 
 function providerProfileCapability(node: NodeSummary | undefined, key: string) {

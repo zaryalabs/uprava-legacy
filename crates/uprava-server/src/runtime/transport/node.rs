@@ -464,10 +464,20 @@ pub(crate) async fn node_provider_mcp_access(
         ));
     }
     let command: CommandEnvelope = serde_json::from_str(&command_json)?;
-    if command.kind != CommandKind::SendTurn {
+    let managed_process_start = matches!(
+        &command.payload,
+        CommandPayload::StartRuntime {
+            execution_profile: AgentExecutionProfile::Managed,
+            ..
+        } | CommandPayload::ResumeRuntime {
+            execution_profile: AgentExecutionProfile::Managed,
+            ..
+        }
+    );
+    if command.kind != CommandKind::SendTurn && !managed_process_start {
         return Err(AppError::bad_request(
             "provider.command_not_eligible",
-            "Only a session turn can receive provider MCP access",
+            "Only a session turn or Managed runtime start can receive provider MCP access",
         ));
     }
     let session_thread_id = command.target.session_thread_id().cloned().ok_or_else(|| {
@@ -496,8 +506,18 @@ pub(crate) async fn node_provider_mcp_access(
         ));
     }
 
-    let (access_token, claims) =
-        issue_mcp_access_lease(&state, &session_thread_id, ActorRef::Provider { provider }).await?;
+    let actor_ref = ActorRef::Provider { provider };
+    let (access_token, claims) = if command.kind == CommandKind::ResumeRuntime {
+        issue_mcp_access_lease_for_resume(
+            &state,
+            &session_thread_id,
+            actor_ref,
+            &request.command_id,
+        )
+        .await?
+    } else {
+        issue_mcp_access_lease(&state, &session_thread_id, actor_ref).await?
+    };
     audit_security_event(
         &state,
         "provider.mcp_access.issued",

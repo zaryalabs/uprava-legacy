@@ -104,7 +104,7 @@ pub struct CreateSessionRequest {
     pub project_placement_id: ProjectPlacementId,
     pub title: Option<String>,
     pub provider: String,
-    /// Missing remains Exec compatibility until the managed default-on gate.
+    /// Missing selects the safe Managed profile; callers must request Exec compatibility explicitly.
     #[serde(default)]
     pub execution_profile: Option<AgentExecutionProfile>,
     #[serde(default)]

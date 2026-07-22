@@ -1603,6 +1603,7 @@ export type McpAccessLeaseClaims = {
   issued_at: string;
   expires_at: string;
   credential_version: number;
+  resume_command_id: string | null;
 };
 
 export type IntegrationConnectRequest = {

@@ -11,6 +11,7 @@ use super::*;
 #[serde(rename_all = "snake_case")]
 pub enum AgentExecutionProfile {
     Managed,
+    /// Legacy serde/event fallback. New Agent session admission defaults explicitly to Managed.
     #[default]
     ExecCompatibility,
 }

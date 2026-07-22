@@ -499,6 +499,7 @@ const mcpAccessLeaseClaimsSchema = z
     issued_at: z.string(),
     expires_at: z.string(),
     credential_version: z.number().int().nonnegative(),
+    resume_command_id: nullableString,
   })
   .strict() satisfies z.ZodType<McpAccessLeaseClaims>;
 

@@ -403,6 +403,33 @@ fn codex_mcp_delivery_keeps_lease_out_of_process_arguments_and_debug_output() {
 }
 
 #[test]
+fn provider_environment_keeps_only_allowlisted_inherited_values() {
+    let _lock = env_lock();
+    let _env = EnvGuard::cleared(&["OPENAI_PROJECT", "UPRAVA_SECRET_SENTINEL"]);
+    std::env::set_var("OPENAI_PROJECT", "allowed-project");
+    std::env::set_var("UPRAVA_SECRET_SENTINEL", "must-not-leak");
+    let mut command = TokioCommand::new("codex");
+
+    configure_provider_environment(&mut command);
+
+    let environment = command
+        .as_std()
+        .get_envs()
+        .map(|(name, value)| {
+            (
+                name.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    assert_eq!(
+        environment.get("OPENAI_PROJECT"),
+        Some(&Some("allowed-project".to_owned()))
+    );
+    assert!(!environment.contains_key("UPRAVA_SECRET_SENTINEL"));
+}
+
+#[test]
 fn provider_mcp_access_failure_stops_turn_before_codex_launch() {
     let command = command_fixture("command-mcp-unavailable", CommandKind::SendTurn);
     let mut local_state = NodeLocalState::default();

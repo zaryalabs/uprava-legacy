@@ -598,9 +598,12 @@ provider-event confirmation и attempt-aware actual-state reconciliation. Stale
 Node report не может воскресить superseded attempt, а отсутствие live managed
 process даёт explicit provider-resumable projection. Web baseline `0.2.24`
 добавляет явный profile/policy start contract, semantic activity and interaction
-cards, persistent runtime diagnostics и capability-aware lifecycle. Managed
-остаётся opt-in до real-provider rollout gate; internal Jobs остаются на явном
-Exec compatibility path, а Task Run contract не меняется.
+cards, persistent runtime diagnostics и capability-aware lifecycle. Closure
+baseline `0.2.25` переводит новые Agent sessions на Managed default при
+подтверждённых Node capabilities; отсутствующий profile на incapable Node
+получает typed rejection без Exec fallback. Stored profiles не мигрируют,
+internal Jobs остаются на явном Exec compatibility path, а Task Run contract
+не меняется.
 
 ### Client отвечает за
 

@@ -101,23 +101,22 @@ state, включая auth, находится в `/var/lib/uprava/.codex` с п
 `ProtectHome=true`: daemon получает system CLI и собственный state, но не
 доступ к `/home`.
 
-Для текущего `codex exec` adapter Node запускает Codex с
-`--skip-git-repo-check` и
-`--dangerously-bypass-approvals-and-sandbox`. Это намеренная временная
-self-hosting posture: внутренний Linux sandbox Codex может быть недоступен на
-сервере, поэтому effective boundary сейчас задают Unix user `uprava`,
-`UPRAVA_NODE_WORKSPACES` allow-list, inherited workspace ACLs and production
-boundary ниже. Пункт `16 Managed Agent Work Loop` должен сделать
-provider-native managed path с safe sandbox и реальными approvals основным
-режимом Agent. Текущий path при этом сохраняется как явный unrestricted Exec
-compatibility mode.
+Baseline `0.2.25` запускает новые Agent sessions через provider-native Managed
+path с safe sandbox и реальными approvals, если Node объявил полный capability
+set. Current `codex exec` adapter с `--skip-git-repo-check` и
+`--dangerously-bypass-approvals-and-sandbox` сохранён как явный unrestricted
+Exec compatibility mode; он требует отдельного выбора и не используется для
+recovery Managed session. Effective self-hosting boundary дополнительно задают
+Unix user `uprava`, `UPRAVA_NODE_WORKSPACES` allow-list, inherited workspace
+ACLs and production boundary ниже.
 
 Это accepted audit risk P0-3, а не production-grade hostile-workload
 isolation. Точный follow-up и exit criteria зафиксированы в
 [`feature-queue.md`](../product/feature-queue.md#16-managed-agent-work-loop):
 provider-native live runtime, safe-by-default sandboxing, real approval
 handling, явный unsafe compatibility mode и visible effective policy.
-Quality-foundation work 0.2.0 не меняет текущие launch flags.
+Operator acceptance и recovery diagnostics описаны в
+[`managed-agent-runtime.md`](../runbooks/managed-agent-runtime.md).
 
 ## Git Credentials
 
@@ -187,7 +186,8 @@ and CI/CD path через direct server mutations.
 1. Open `https://uprava.zrya.io`.
 2. Confirm the host Node is visible and reachable.
 3. Register or select placement `/srv/uprava-workspaces/uprava`.
-4. Start a session against that placement.
+4. Убедиться, что Node объявляет Managed capabilities, и запустить Managed
+   session against that placement.
 5. Make a small documentation-only change.
 6. Run a targeted check and capture the output.
 7. Commit on a feature branch.

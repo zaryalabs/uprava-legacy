@@ -25,12 +25,11 @@ process, но session thread, workspace state и resume context должны п�
 stateless/ephemeral strategies, более похожие на Codbash-like resume/launcher
 подход или sandboxed task runtime.
 
-Implementation baseline `0.2.24` замыкает opt-in Web vertical slice поверх
+Implementation baseline `0.2.25` закрывает Managed Agent Work Loop поверх
 Node-owned managed runtime и Core-owned orchestration: Codex app-server остаётся
-живым между turns, а существующий adapter `codex exec/resume` сохранён отдельно. Пункт очереди
-[`16 Managed Agent Work Loop`](../../product/feature-queue.md#16-managed-agent-work-loop)
-должен сделать provider-native managed runtime основным режимом Agent, а
-нынешний exec/resume path сохранить как явный compatibility mode.
+живым между turns, Managed является default новых Agent sessions на capable
+Node, а существующий adapter `codex exec/resume` сохранён как отдельный явный
+compatibility mode.
 
 ## Provider protocol gate 0.2.20
 
@@ -220,8 +219,8 @@ Implementation baseline `0.2.23` материализует control-plane author
 
 - policy preview и session creation используют один resolver; profile,
   immutable policy/hash, Start command и audit фиксируются одной транзакцией;
-- явный Exec compatibility selection записывается как unsafe policy audit, но
-  отсутствие profile до default-on gate остаётся совместимым default;
+- явный Exec compatibility selection записывается как unsafe policy audit;
+  отсутствие profile выбирает Managed и проходит тот же capability gate;
 - provider interaction проходит `requested -> resolving -> approved | denied |
   answered`, либо `expired | cancelled | superseded`; Core записывает decision
   intent вместе с dispatch command, а provider event остаётся единственным
@@ -237,8 +236,8 @@ Implementation baseline `0.2.23` материализует control-plane author
   labels только provider/profile/state, без session id, prompt или workspace
   content.
 
-Это закрывает этап 3; Web work surface закрыт baseline `0.2.24`, а rollout и
-real-provider acceptance остаются этапом 5.
+Это закрывает этап 3; Web work surface закрыт baseline `0.2.24`, rollout и
+default-on closure — baseline `0.2.25`.
 
 ### Agent Web work surface baseline 0.2.24
 
@@ -262,8 +261,25 @@ runtime state:
   показывается для Exec compatibility, Detach не останавливает runtime, а
   Stop сохраняет durable session history.
 
-Managed остаётся явным opt-in. Смена default разрешена только после stage 5
-real-provider, recovery and controlled-rollout gate.
+В baseline `0.2.24` Managed ещё остаётся явным opt-in; смена default происходит
+только в следующем stage 5 после real-provider, recovery and controlled-rollout
+gate.
+
+### Recovery и default-on closure 0.2.25
+
+Stage 5 меняет только создание новых Agent sessions. Web выбирает Managed при
+available `provider.codex.managed`; Create Session API также трактует missing
+profile как Managed и возвращает typed capability error на incapable Node без
+создания Exec runtime. Existing sessions сохраняют profile migration 18,
+internal Jobs продолжают явно выбирать Exec compatibility, а Task Run не
+создаёт interactive session.
+
+Node очищает inherited environment provider child process и возвращает только
+allowlisted OS/auth/proxy variables плюс отдельный ephemeral MCP token env.
+Host-only `make codex-smoke` проверяет safe default policy, sequential Managed
+turns, detach/reattach, stop/resume, reload и явный compatibility turn; полный
+operator/recovery порядок зафиксирован в
+[`managed-agent-runtime.md`](../../runbooks/managed-agent-runtime.md).
 
 Дополнительное уточнение: V01 является **Codex-first**, но не должен
 становиться **Codex-only** в продуктовой модели. Первый adapter может быть

@@ -31,7 +31,7 @@ UPRAVA_TOOLHIVE_IMAGE ?= $(IMAGE_NAMESPACE)/uprava-toolhive:$(IMAGE_TAG)
 UPRAVA_TOOLHIVE_VERSION ?= 0.40.0
 UPRAVA_TASK_RUNTIME_IMAGE ?= $(IMAGE_NAMESPACE)/uprava-codex-runtime:$(IMAGE_TAG)
 UPRAVA_OPENSANDBOX_IMAGE ?= opensandbox/server:v0.2.2
-UPRAVA_TASK_RUNTIME_DEV_IMAGE ?= uprava/codex-runtime:0.2.24
+UPRAVA_TASK_RUNTIME_DEV_IMAGE ?= uprava/codex-runtime:0.2.25
 UPRAVA_NODE_PACKAGE_VERSION := $(shell awk -F'"' '/^version = / { print $$2; exit }' crates/uprava-node/Cargo.toml)
 UPRAVA_NODE_VERSION ?= $(UPRAVA_NODE_PACKAGE_VERSION)+$(GIT_SHA)
 RELEASE_ID ?= $(SHORT_SHA)

@@ -1,6 +1,77 @@
 use super::*;
 
 #[tokio::test]
+async fn runtime_stopped_closes_managed_attempt_before_resume_attempt_starts() {
+    let state = test_state().await;
+    let (node_id, detail, workspace_path) = create_test_session(&state).await;
+    let mut started = node_event_fixture(
+        &detail,
+        node_id.clone(),
+        "attempt-before-stop",
+        1,
+        EventKind::RuntimeAttemptStarted,
+        json!({
+            "runtime_attempt_id": "attempt-before-stop",
+            "state": "ready",
+            "reason": "session_start",
+        }),
+    );
+    started.turn_id = None;
+    accept_node_event(&state, started)
+        .await
+        .expect("first attempt starts");
+    let mut stopped = node_event_fixture(
+        &detail,
+        node_id.clone(),
+        "runtime-stop",
+        2,
+        EventKind::RuntimeStopped,
+        json!({"provider": "codex", "mode": "managed", "reason": "explicit_stop"}),
+    );
+    stopped.turn_id = None;
+    accept_node_event(&state, stopped)
+        .await
+        .expect("runtime stop projects");
+    let mut resumed = node_event_fixture(
+        &detail,
+        node_id,
+        "attempt-after-stop",
+        3,
+        EventKind::RuntimeAttemptStarted,
+        json!({
+            "runtime_attempt_id": "attempt-after-stop",
+            "state": "starting",
+            "reason": "explicit_resume",
+        }),
+    );
+    resumed.turn_id = None;
+    accept_node_event(&state, resumed)
+        .await
+        .expect("resume attempt supersedes stopped attempt");
+
+    let stopped_attempt: (String, Option<String>) = sqlx::query_as(
+        "select state, stop_reason from runtime_attempts where runtime_attempt_id = 'attempt-before-stop'",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .expect("stopped attempt loads");
+    let current_attempt: String = sqlx::query_scalar(
+        "select current_attempt_id from runtime_sessions where runtime_session_id = ?1",
+    )
+    .bind(detail.session.runtime.runtime_session_id.as_str())
+    .fetch_one(&state.pool)
+    .await
+    .expect("current attempt loads");
+
+    assert_eq!(
+        stopped_attempt,
+        ("stopped".to_owned(), Some("explicit_stop".to_owned()))
+    );
+    assert_eq!(current_attempt, "attempt-after-stop");
+    let _ = std::fs::remove_dir_all(workspace_path);
+}
+
+#[tokio::test]
 async fn managed_attempt_and_interaction_events_round_trip_through_persistence() {
     let state = test_state().await;
     let (node_id, detail, workspace_path) = create_test_session(&state).await;
@@ -142,6 +213,78 @@ async fn managed_attempt_and_interaction_events_round_trip_through_persistence()
     std::fs::remove_dir_all(&workspace_path).expect("workspace dir removes");
 
     assert_eq!(terminal_state, "answered");
+}
+
+#[tokio::test]
+async fn expired_provider_interaction_rejects_late_input_without_command() {
+    let state = test_state().await;
+    let (node_id, detail, workspace_path) = create_test_session(&state).await;
+    let attempt_id = "attempt-expired-interaction";
+    let mut started = node_event_fixture(
+        &detail,
+        node_id.clone(),
+        "expired-interaction-attempt",
+        1,
+        EventKind::RuntimeAttemptStarted,
+        json!({
+            "runtime_attempt_id": attempt_id,
+            "state": "ready",
+            "reason": "session_start",
+        }),
+    );
+    started.turn_id = None;
+    accept_node_event(&state, started)
+        .await
+        .expect("attempt event accepts");
+    let mut requested = node_event_fixture(
+        &detail,
+        node_id,
+        "expired-interaction-requested",
+        2,
+        EventKind::ProviderInteractionRequested,
+        json!({
+            "provider_interaction_id": "interaction-expired",
+            "runtime_attempt_id": attempt_id,
+            "interaction_kind": "user_input",
+            "prompt": "This request is already stale",
+            "expires_at": Utc::now() - chrono::Duration::seconds(1),
+        }),
+    );
+    requested.turn_id = None;
+    accept_node_event(&state, requested)
+        .await
+        .expect("interaction event accepts");
+    let before = command_count(&state).await;
+
+    let result = submit_provider_input_route(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path((
+            detail.session.session_thread_id.to_string(),
+            "interaction-expired".to_owned(),
+        )),
+        Json(SubmitProviderInputRequest {
+            answers: vec!["too late".to_owned()],
+        }),
+    )
+    .await;
+    let state_value: String = sqlx::query_scalar(
+        "select state from provider_interactions where provider_interaction_id = 'interaction-expired'",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .expect("expired interaction reloads");
+
+    assert!(matches!(
+        result,
+        Err(AppError::Conflict {
+            code: "provider_interaction.expired",
+            ..
+        })
+    ));
+    assert_eq!(state_value, "expired");
+    assert_eq!(command_count(&state).await, before);
+    std::fs::remove_dir_all(&workspace_path).expect("workspace dir removes");
 }
 
 #[tokio::test]

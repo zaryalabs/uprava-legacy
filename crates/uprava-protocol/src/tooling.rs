@@ -511,6 +511,8 @@ pub struct McpAccessLeaseClaims {
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub credential_version: u64,
+    #[serde(default)]
+    pub resume_command_id: Option<CommandId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

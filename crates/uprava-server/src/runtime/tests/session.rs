@@ -1,9 +1,42 @@
 use super::*;
 
 #[tokio::test]
-async fn create_session_defaults_to_exec_compatibility_with_hashed_policy() {
+async fn create_session_without_profile_defaults_to_managed_on_capable_node() {
     let state = test_state().await;
-    let (_node_id, detail, workspace_path) = create_test_session(&state).await;
+    let (node_id, compatibility, workspace_path) = create_test_session(&state).await;
+    let capabilities = std::iter::once(CapabilitySummary {
+        key: "provider.codex".to_owned(),
+        value: CapabilityValue::provider(true),
+    })
+    .chain(
+        ProviderRuntimeCapability::required_for_managed_codex()
+            .iter()
+            .map(|capability| CapabilitySummary {
+                key: capability.as_str().to_owned(),
+                value: CapabilityValue::Provider {
+                    available: true,
+                    configured: true,
+                    mode: "managed".to_owned(),
+                    timeout_seconds: None,
+                    unavailable_reason: None,
+                },
+            }),
+    )
+    .collect();
+    set_node_capabilities(&state, &node_id, capabilities).await;
+    let detail = create_session(
+        State(state.clone()),
+        Json(CreateSessionRequest {
+            project_placement_id: compatibility.placement.project_placement_id,
+            title: Some("Managed by default".to_owned()),
+            provider: "codex".to_owned(),
+            execution_profile: None,
+            force: false,
+        }),
+    )
+    .await
+    .expect("capable Node accepts the managed default")
+    .0;
 
     let policy = detail
         .session
@@ -26,11 +59,70 @@ async fn create_session_defaults_to_exec_compatibility_with_hashed_policy() {
             policy.policy_hash().expect("policy hashes"),
         ),
         (
-            AgentExecutionProfile::ExecCompatibility,
-            ProviderSandboxMode::DangerFullAccess,
-            ProviderApprovalMode::Never,
+            AgentExecutionProfile::Managed,
+            ProviderSandboxMode::WorkspaceWrite,
+            ProviderApprovalMode::Untrusted,
             stored_hash.clone(),
         )
+    );
+    std::fs::remove_dir_all(&workspace_path).expect("workspace dir removes");
+}
+
+#[tokio::test]
+async fn create_session_without_profile_rejects_incapable_node_without_exec_fallback() {
+    let state = test_state().await;
+    let (_node_id, compatibility, workspace_path) = create_test_session(&state).await;
+    let before = command_count(&state).await;
+
+    let result = create_session(
+        State(state.clone()),
+        Json(CreateSessionRequest {
+            project_placement_id: compatibility.placement.project_placement_id,
+            title: Some("Managed default unavailable".to_owned()),
+            provider: "codex".to_owned(),
+            execution_profile: None,
+            force: false,
+        }),
+    )
+    .await;
+
+    assert!(matches!(
+        result,
+        Err(AppError::BadRequest {
+            code: "runtime.profile_capability_unavailable",
+            ..
+        })
+    ));
+    assert_eq!(command_count(&state).await, before);
+    std::fs::remove_dir_all(&workspace_path).expect("workspace dir removes");
+}
+
+#[tokio::test]
+async fn capable_node_does_not_rewrite_existing_exec_session_profile() {
+    let state = test_state().await;
+    let (node_id, compatibility, workspace_path) = create_test_session(&state).await;
+    let capabilities = ProviderRuntimeCapability::required_for_managed_codex()
+        .iter()
+        .map(|capability| CapabilitySummary {
+            key: capability.as_str().to_owned(),
+            value: CapabilityValue::Provider {
+                available: true,
+                configured: true,
+                mode: "managed".to_owned(),
+                timeout_seconds: None,
+                unavailable_reason: None,
+            },
+        })
+        .collect();
+
+    set_node_capabilities(&state, &node_id, capabilities).await;
+    let reloaded = load_session_detail(&state, &compatibility.session.session_thread_id)
+        .await
+        .expect("existing session reloads");
+
+    assert_eq!(
+        reloaded.session.runtime.execution_profile,
+        AgentExecutionProfile::ExecCompatibility
     );
     std::fs::remove_dir_all(&workspace_path).expect("workspace dir removes");
 }

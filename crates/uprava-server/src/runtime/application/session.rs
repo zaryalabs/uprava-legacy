@@ -38,7 +38,9 @@ pub(crate) async fn create_session_with_correlation(
     ensure_node_commandable(state, &placement.node_id).await?;
     ensure_placement_startable(&placement)?;
     let profile_was_explicit = request.execution_profile.is_some();
-    let execution_profile = request.execution_profile.unwrap_or_default();
+    let execution_profile = request
+        .execution_profile
+        .unwrap_or(AgentExecutionProfile::Managed);
     let provider_capabilities = ensure_node_supports_execution_profile(
         state,
         &placement.node_id,

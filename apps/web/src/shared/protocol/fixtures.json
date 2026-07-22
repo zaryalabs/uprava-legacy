@@ -793,6 +793,7 @@
       "node_id": "node-fixture",
       "project_id": "project-fixture",
       "project_placement_id": "placement-fixture",
+      "resume_command_id": null,
       "session_thread_id": "session-fixture"
     },
     "node_command": {

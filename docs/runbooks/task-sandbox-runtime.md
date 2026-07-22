@@ -2,7 +2,7 @@
 
 Статус: `active`
 
-Runbook относится к implementation baseline `0.2.24`. Он проверяет
+Runbook относится к implementation baseline `0.2.25`. Он проверяет
 Docker/OpenSandbox, Task Run, worktree, cancellation, cleanup и evidence.
 OpenSandbox API key и persistent Codex credential profile пока намеренно
 отложены; профиль нельзя считать production-ready до отдельной auth acceptance.
@@ -34,7 +34,7 @@ worktree остаётся для review.
 
 ## Локальный запуск
 
-Соберите `uprava/codex-runtime:0.2.24` и поднимите pinned OpenSandbox:
+Соберите `uprava/codex-runtime:0.2.25` и поднимите pinned OpenSandbox:
 
 ```sh
 make task-runtime-up
@@ -46,7 +46,7 @@ curl --fail http://127.0.0.1:18083/health
 ```sh
 export UPRAVA_NODE_WORKSPACES="$PWD"
 export UPRAVA_OPENSANDBOX_URL=http://127.0.0.1:18083
-export UPRAVA_TASK_RUNTIME_IMAGE=uprava/codex-runtime:0.2.24
+export UPRAVA_TASK_RUNTIME_IMAGE=uprava/codex-runtime:0.2.25
 make node-r
 ```
 

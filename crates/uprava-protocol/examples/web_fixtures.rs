@@ -740,6 +740,7 @@ fn tooling_contract_fixture(
             issued_at: at,
             expires_at: at + chrono::Duration::minutes(10),
             credential_version: 1,
+            resume_command_id: None,
         },
         tool_definitions: ToolDefinitionsResponse {
             items: vec![definition],

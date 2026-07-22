@@ -881,6 +881,7 @@ impl CodexProviderAdapter {
         }
         let prompt = deduction_prompt(package);
         let mut command = TokioCommand::new(&self.codex_binary);
+        configure_provider_environment(&mut command);
         command.arg("exec");
         if self.ignore_user_config {
             command.arg("--ignore-user-config");
@@ -1476,6 +1477,7 @@ impl CodexProviderAdapter {
         cancellation: Option<watch::Receiver<bool>>,
     ) -> Result<CodexProcessOutput, ProviderStartFailure> {
         let mut command = TokioCommand::new(&self.codex_binary);
+        configure_provider_environment(&mut command);
         configure_uprava_mcp(&mut command, provider_mcp_access)?;
         command.arg("exec");
         if self.ignore_user_config {
@@ -1528,6 +1530,7 @@ impl CodexProviderAdapter {
         cancellation: Option<watch::Receiver<bool>>,
     ) -> Result<CodexProcessOutput, ProviderStartFailure> {
         let mut command = TokioCommand::new(&self.codex_binary);
+        configure_provider_environment(&mut command);
         configure_uprava_mcp(&mut command, provider_mcp_access)?;
         command.arg("exec");
         if self.ignore_user_config {
@@ -1798,6 +1801,52 @@ pub(crate) fn configure_uprava_mcp(
         ))
         .env(UPRAVA_MCP_TOKEN_ENV, access.access_token.expose_secret());
     Ok(())
+}
+
+const PROVIDER_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "CODEX_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+    "LANG",
+    "LC_ALL",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORGANIZATION",
+    "OPENAI_PROJECT",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_OPENAI_API_VERSION",
+];
+
+pub(crate) fn configure_provider_environment(command: &mut TokioCommand) {
+    let inherited = PROVIDER_ENV_ALLOWLIST
+        .iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (*name, value)))
+        .collect::<Vec<_>>();
+    command.env_clear().envs(inherited);
 }
 
 #[cfg(unix)]

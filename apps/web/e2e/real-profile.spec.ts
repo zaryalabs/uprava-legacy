@@ -16,10 +16,17 @@ const expectedAssistantContent =
   process.env.UPRAVA_E2E_EXPECTED_ASSISTANT_CONTENT ?? "UPRAVA_CODEX_SMOKE_OK";
 const turnTimeoutMs = Number(process.env.UPRAVA_E2E_TURN_TIMEOUT_MS ?? "30000");
 const lifecycleEnabled = process.env.UPRAVA_E2E_LIFECYCLE === "1";
+const execCompatibilityEnabled =
+  process.env.UPRAVA_E2E_EXEC_COMPATIBILITY === "1";
 const testTimeoutMs = Number(
   process.env.UPRAVA_E2E_TEST_TIMEOUT_MS ??
     String(
-      Math.max(30_000, turnTimeoutMs + (lifecycleEnabled ? 45_000 : 15_000)),
+      Math.max(
+        30_000,
+        turnTimeoutMs *
+          (1 + Number(lifecycleEnabled) + Number(execCompatibilityEnabled)) +
+          45_000,
+      ),
     ),
 );
 
@@ -41,6 +48,9 @@ test.describe("real local profile", () => {
       placementId,
       csrfToken,
     );
+    expect(runtimeProfile(session)).toBe("managed");
+    expect(runtimePolicyField(session, "sandbox_mode")).toBe("workspace-write");
+    expect(runtimePolicyField(session, "approval_mode")).toBe("untrusted");
     const sessionId = isRecord(session.session)
       ? stringField(session.session, "session_thread_id")
       : "";
@@ -74,11 +84,15 @@ test.describe("real local profile", () => {
     await expect(
       main.getByText(expectedAssistantContent, { exact: true }),
     ).toBeVisible();
+    await main.getByText("Session details").click();
     await expect(
       main.getByRole("heading", { name: "Evidence Projection" }),
     ).toBeVisible();
-    await expect(main.getByText(provider, { exact: true })).toBeVisible();
-    await expect(main.getByText("ready", { exact: true })).toBeVisible();
+    await expect(
+      main
+        .getByRole("article", { name: sessionTitle })
+        .getByText("SESSION / managed / ready", { exact: true }),
+    ).toBeVisible();
 
     if (lifecycleEnabled) {
       await page.getByRole("button", { name: "Detach" }).click();
@@ -119,11 +133,41 @@ test.describe("real local profile", () => {
       await expect(
         page.getByRole("main").getByText(postResumeAssistant, { exact: true }),
       ).toBeVisible();
+      await page.getByRole("main").getByText("Session details").click();
       await expect(
         page
           .getByRole("main")
           .getByRole("heading", { name: "Evidence Projection" }),
       ).toBeVisible();
+    }
+
+    if (execCompatibilityEnabled) {
+      const compatibility = await createProviderSession(
+        request,
+        placementId,
+        csrfToken,
+        "exec_compatibility",
+        `${sessionTitle} · Exec compatibility`,
+      );
+      expect(runtimeProfile(compatibility)).toBe("exec_compatibility");
+      const compatibilityId = isRecord(compatibility.session)
+        ? stringField(compatibility.session, "session_thread_id")
+        : "";
+      expect(compatibilityId).not.toBe("");
+      const compatibilityUrl = `${coreUrl}/api/v1/sessions/${encodeURIComponent(compatibilityId)}`;
+      await waitForRuntimeState(request, compatibilityUrl, "ready");
+      await postJson(
+        request,
+        `${compatibilityUrl}/turns`,
+        { content: turnContent },
+        csrfToken,
+      );
+      await waitForAssistantContent(
+        request,
+        compatibilityUrl,
+        expectedAssistantContent,
+      );
+      await waitForRuntimeState(request, compatibilityUrl, "ready");
     }
   });
 });
@@ -208,17 +252,43 @@ async function createProviderSession(
   request: APIRequestContext,
   placementId: string,
   csrfToken: string,
+  executionProfile?: "managed" | "exec_compatibility",
+  title = sessionTitle,
 ) {
   return postJson(
     request,
     `${coreUrl}/api/v1/sessions`,
     {
       project_placement_id: placementId,
-      title: sessionTitle,
+      title,
       provider,
+      ...(executionProfile ? { execution_profile: executionProfile } : {}),
     },
     csrfToken,
   );
+}
+
+function runtimeProfile(value: unknown) {
+  if (
+    !isRecord(value) ||
+    !isRecord(value.session) ||
+    !isRecord(value.session.runtime)
+  ) {
+    return "";
+  }
+  return stringField(value.session.runtime, "execution_profile");
+}
+
+function runtimePolicyField(value: unknown, field: string) {
+  if (
+    !isRecord(value) ||
+    !isRecord(value.session) ||
+    !isRecord(value.session.runtime) ||
+    !isRecord(value.session.runtime.effective_policy)
+  ) {
+    return "";
+  }
+  return stringField(value.session.runtime.effective_policy, field);
 }
 
 async function waitForRuntimeState(

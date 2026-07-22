@@ -816,7 +816,13 @@ pub(crate) async fn accept_node_event(
     // moved into a dedicated module.
     let _ingest_guard = state.event_ingest_lock.lock().await;
     let mut event = event;
-    let mut transaction = state.pool.begin().await?;
+    // Event projection reads dedupe/cursor state before writing several read
+    // models. Reserve the SQLite writer slot before that snapshot so command
+    // acknowledgements and HTTP mutations cannot invalidate it with
+    // SQLITE_BUSY_SNAPSHOT and strand durable Node outbox events.
+    let connection = state.pool.acquire().await?;
+    let mut transaction =
+        sqlx::Transaction::begin(connection, Some("BEGIN IMMEDIATE".into())).await?;
     let existing_event: Option<(String, String)> =
         sqlx::query_as("select projection_state, event_json from events where event_id = ?1")
             .bind(event.event_id.as_str())
@@ -1280,6 +1286,36 @@ pub(crate) async fn apply_event_projection_on_connection(
                     RuntimeSessionState::Stopped,
                     event.happened_at,
                 )
+                .await?;
+                let stop_reason = match event.payload.kind() {
+                    EventPayloadKind::RuntimeStopped { data } => {
+                        data.reason.as_deref().unwrap_or("runtime_stopped")
+                    }
+                    _ => "runtime_stopped",
+                };
+                sqlx::query(
+                    r#"
+                    update runtime_attempts
+                    set state = 'stopped', stop_reason = ?1, stopped_at = ?2, updated_at = ?2
+                    where runtime_attempt_id = (
+                        select current_attempt_id
+                        from runtime_sessions
+                        where runtime_session_id = ?3
+                    )
+                      and state not in ('stopped', 'failed', 'lost')
+                    "#,
+                )
+                .bind(stop_reason)
+                .bind(event.happened_at)
+                .bind(runtime_session_id.as_str())
+                .execute(&mut *connection)
+                .await?;
+                sqlx::query(
+                    "update provider_interactions set state = 'cancelled', resolved_at = ?1 where runtime_session_id = ?2 and state in ('requested', 'resolving')",
+                )
+                .bind(event.happened_at)
+                .bind(runtime_session_id.as_str())
+                .execute(&mut *connection)
                 .await?;
             }
             update_session_state_from_event_on_connection(

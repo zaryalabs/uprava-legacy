@@ -99,7 +99,14 @@ pub(crate) async fn register_tool_definitions(
     definitions: &[ToolDefinition],
 ) -> Result<(), AppError> {
     let now = Utc::now();
-    let mut transaction = state.pool.begin().await?;
+    let connection = state.pool.acquire().await?;
+    // Lease rotation reads the current credential version before revoking and
+    // inserting. A deferred SQLite transaction can lose that read snapshot to
+    // a concurrent command acknowledgement and fail with SQLITE_BUSY_SNAPSHOT.
+    // Acquire the write reservation up front so recovery/start paths serialize
+    // here and still honor the configured busy timeout.
+    let mut transaction =
+        sqlx::Transaction::begin(connection, Some("BEGIN IMMEDIATE".into())).await?;
     sqlx::query(
         r#"
         insert into tool_sources (
@@ -1789,6 +1796,30 @@ pub(crate) async fn issue_mcp_access_lease(
     session_id: &SessionThreadId,
     actor_ref: ActorRef,
 ) -> Result<(String, McpAccessLeaseClaims), AppError> {
+    issue_mcp_access_lease_with_state(state, session_id, actor_ref, None).await
+}
+
+pub(crate) async fn issue_mcp_access_lease_for_resume(
+    state: &AppState,
+    session_id: &SessionThreadId,
+    actor_ref: ActorRef,
+    resume_command_id: &CommandId,
+) -> Result<(String, McpAccessLeaseClaims), AppError> {
+    issue_mcp_access_lease_with_state(
+        state,
+        session_id,
+        actor_ref,
+        Some(resume_command_id.clone()),
+    )
+    .await
+}
+
+async fn issue_mcp_access_lease_with_state(
+    state: &AppState,
+    session_id: &SessionThreadId,
+    actor_ref: ActorRef,
+    resume_command_id: Option<CommandId>,
+) -> Result<(String, McpAccessLeaseClaims), AppError> {
     if !tool_is_visible_to_actor(&actor_ref) {
         return Err(AppError::auth(
             "mcp_lease.actor_denied",
@@ -1796,7 +1827,7 @@ pub(crate) async fn issue_mcp_access_lease(
         ));
     }
     let scope = load_scoped_identity_for_session(state, session_id).await?;
-    if matches!(scope.session_state, SessionThreadState::Stopped) {
+    if matches!(scope.session_state, SessionThreadState::Stopped) && resume_command_id.is_none() {
         return Err(AppError::auth(
             "mcp_lease.session_stopped",
             "Stopped session cannot receive an MCP lease",
@@ -1829,6 +1860,7 @@ pub(crate) async fn issue_mcp_access_lease(
         issued_at: now,
         expires_at,
         credential_version: credential_version as u64,
+        resume_command_id,
     };
     let claims_json = serde_json::to_string(&claims)?;
     sqlx::query(
@@ -1923,10 +1955,35 @@ pub(crate) async fn validate_mcp_access_lease(
     let identity = load_scoped_identity_for_session(state, &claims.session_thread_id)
         .await
         .map_err(app_tool_error)?;
+    let stopped_resume_is_active = if matches!(identity.session_state, SessionThreadState::Stopped)
+    {
+        if let Some(command_id) = claims.resume_command_id.as_ref() {
+            sqlx::query_scalar::<_, i64>(
+                r#"
+                select count(*)
+                from commands
+                where command_id = ?1
+                  and session_thread_id = ?2
+                  and kind = 'ResumeRuntime'
+                  and state not in ('completed', 'failed', 'blocked', 'expired')
+                "#,
+            )
+            .bind(command_id.as_str())
+            .bind(claims.session_thread_id.as_str())
+            .fetch_one(&state.pool)
+            .await
+            .map_err(internal_tool_error)?
+                == 1
+        } else {
+            false
+        }
+    } else {
+        true
+    };
     if identity.node_id != claims.node_id
         || identity.placement_id != claims.project_placement_id
         || identity.project_id != claims.project_id
-        || matches!(identity.session_state, SessionThreadState::Stopped)
+        || !stopped_resume_is_active
     {
         return Err(tool_error(
             ToolExecutionErrorCode::ScopeMismatch,

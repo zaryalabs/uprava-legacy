@@ -40,7 +40,7 @@ dependency, complexity, risk and value. Позиции могут двигать
 
 ## Обзор очереди
 
-Current release baseline: `0.2.24`. Закрытые пункты `0` through `14`, unified
+Current release baseline: `0.2.25`. Закрытые пункты `0` through `14` и `16`, unified
 audit hardening release и `5a` workspace renderer release соответствуют shipped
 versions, зафиксированным в [`releases.md`](../releases.md). Пункт `6` включает
 workbench alignment, первый стабильный self-hosted deployment path и
@@ -76,7 +76,7 @@ OpenSandbox API key и ручной Docker acceptance.
 | 13 | + | Visual artifact system as plugins | Plugin-driven content enhancements for code, colors and diagrams plus artifact viewers for reports, diffs and timelines | Trace, Plugin contribution resolution | High |
 | 14 | + | Dynamic UI from agents as plugins | Opt-in bundled Generated React plugin with sandboxed runtime, Uprava UI SDK, safe fallbacks and permissioned actions | Plugin-delivered visual artifact system | High |
 | 15 | ~ | Task-based sandbox runtime | Docker/OpenSandbox bounded run, isolated worktree, persistent Codex auth and expected evidence | Runtime, workspace, trace | Very high |
-| 16 | - | Managed Agent Work Loop | Provider-native live Codex session with real approvals, interruption, reconnect/resume and an explicit exec compatibility mode | Agent/session runtime baseline, provider-native managed protocol | Very high |
+| 16 | + | Managed Agent Work Loop | Provider-native live Codex session with real approvals, interruption, reconnect/resume and an explicit exec compatibility mode | Agent/session runtime baseline, provider-native managed protocol | Very high |
 | 17 | - | Team/cloud model | Users, roles, shared projects, managed Core/nodes | Mature personal workflow | Very high |
 | 18 | - | Beyond software development | Research, analytics, documents, finance, knowledge workflows | Mature artifact/plugin model | Very high |
 | 19 | - | Audit follow-up refactors | Core/Node module split, generated protocol contracts, async workspace command API | `0.1.6` audit hardening | Medium |
@@ -719,8 +719,12 @@ turn/runtime projection, attempt-aware reconnect, recovery audit and bounded
 metrics. `0.2.24` закрывает stage 4: Web явно выбирает profile, показывает
 policy preview и persistent effective-policy diagnostics, рендерит semantic
 timeline и typed approval/question cards, а interrupt/stop/detach/resume
-следуют projected capabilities. Managed доступен как opt-in на capable Node;
-Exec compatibility остаётся default до stage 5 real-provider and recovery gate.
+следуют projected capabilities. `0.2.25` закрывает stage 5: Managed стал
+default для новых Agent sessions на capable Node, missing profile больше не
+включает Exec fallback, existing sessions сохраняют stored profile, Jobs и
+Tasks остаются изолированными, provider process environment ограничен
+allowlist, а real-host acceptance и recovery matrix оформлены отдельным
+[runbook](../runbooks/managed-agent-runtime.md).
 
 **Target direction:** Provider-neutral managed runtime contract, richer
 TUI-equivalent interaction, runtime recovery, checkpoints and handoff. Agent

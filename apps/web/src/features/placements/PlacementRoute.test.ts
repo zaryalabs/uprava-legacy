@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { NodeSummary } from "../../shared/protocol/types";
 import {
+  defaultExecutionProfile,
   executionProfileOptions,
   managedUnavailableMessage,
   providerChoiceOptions,
@@ -64,6 +65,20 @@ describe("executionProfileOptions", () => {
   it("turns typed managed capability failures into actionable copy", () => {
     expect(managedUnavailableMessage("version_unsupported")).toContain(
       "supported Codex version",
+    );
+  });
+
+  it("defaults capable Nodes to Managed and keeps incapable Nodes explicit", () => {
+    const capable = nodeWithCapabilities([
+      {
+        key: "provider.codex.managed",
+        value: { ...providerCapability(true), mode: "managed" },
+      },
+    ]);
+
+    expect(defaultExecutionProfile(capable, "codex")).toBe("managed");
+    expect(defaultExecutionProfile(undefined, "codex")).toBe(
+      "exec_compatibility",
     );
   });
 });

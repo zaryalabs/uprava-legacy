@@ -17,6 +17,7 @@ TURN_CONTENT="${CODEX_SMOKE_TURN_CONTENT:-Reply exactly UPRAVA_CODEX_SMOKE_OK. D
 EXPECTED_ASSISTANT_CONTENT="${CODEX_SMOKE_EXPECTED_ASSISTANT_CONTENT:-UPRAVA_CODEX_SMOKE_OK}"
 CODEX_TIMEOUT_SECONDS="${CODEX_SMOKE_CODEX_TIMEOUT_SECONDS:-180}"
 SMOKE_RETRIES="${SMOKE_RETRIES:-60}"
+ENROLLMENT_RETRIES="${CODEX_SMOKE_ENROLLMENT_RETRIES:-180}"
 SMOKE_DELAY_SECONDS="${SMOKE_DELAY_SECONDS:-1}"
 CODEX_BINARY="${UPRAVA_CODEX_BINARY:-${CODEX_SMOKE_CODEX_BINARY:-}}"
 WEB_PASSWORD="${CODEX_SMOKE_WEB_PASSWORD:-uprava-smoke-password}"
@@ -218,7 +219,10 @@ authenticate() {
 
 approve_pending_enrollment() {
   attempt=1
-  while [ "$attempt" -le "$SMOKE_RETRIES" ]; do
+  # A clean host may still be compiling the Node binary while Core is already
+  # healthy. Give enrollment its own startup budget instead of coupling it to
+  # the shorter HTTP readiness budget.
+  while [ "$attempt" -le "$ENROLLMENT_RETRIES" ]; do
     body="$(auth_get "$CORE_URL/api/v1/node-enrollments" 2>/dev/null || true)"
     enrollment_id="$(
       printf '%s' "$body" |
@@ -313,6 +317,7 @@ PIDS="$PIDS $!"
 wait_for_contains "codex web entrypoint" "$WEB_URL/" '<title>Uprava</title>'
 wait_for_node_inventory
 wait_for_auth_contains "codex provider capability" "$CORE_URL/api/v1/inventory" '"provider.codex"'
+wait_for_auth_contains "codex managed capability" "$CORE_URL/api/v1/inventory" '"provider.codex.managed"'
 
 (
   cd "$ROOT_DIR"
@@ -325,10 +330,22 @@ wait_for_auth_contains "codex provider capability" "$CORE_URL/api/v1/inventory" 
     UPRAVA_E2E_TURN_CONTENT="$TURN_CONTENT" \
     UPRAVA_E2E_EXPECTED_ASSISTANT_CONTENT="$EXPECTED_ASSISTANT_CONTENT" \
     UPRAVA_E2E_WEB_PASSWORD="$WEB_PASSWORD" \
+    UPRAVA_E2E_LIFECYCLE=1 \
+    UPRAVA_E2E_EXEC_COMPATIBILITY=1 \
     UPRAVA_E2E_TURN_TIMEOUT_MS="$((CODEX_TIMEOUT_SECONDS * 1000))" \
-    UPRAVA_E2E_TEST_TIMEOUT_MS="$(((CODEX_TIMEOUT_SECONDS + 30) * 1000))" \
+    UPRAVA_E2E_TEST_TIMEOUT_MS="$(((CODEX_TIMEOUT_SECONDS * 3 + 90) * 1000))" \
     PLAYWRIGHT_BASE_URL="$WEB_URL" \
     make web-e2e
 ) || fail "codex provider Playwright E2E failed"
+
+{
+  printf 'accepted_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  printf 'codex_version=%s\n' "$("$CODEX_BINARY" --version | head -n 1)"
+  printf 'os=%s\n' "$(uname -srm)"
+  printf 'transport=codex-app-server-v2-loopback-websocket\n'
+  printf 'managed_default=true\n'
+  printf 'exec_compatibility=true\n'
+} >"$STATE_DIR/acceptance.env"
+printf '%s\n' "acceptance metadata: $STATE_DIR/acceptance.env"
 
 echo "codex provider smoke passed"

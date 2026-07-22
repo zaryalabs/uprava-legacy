@@ -114,8 +114,8 @@ Managed Agent, Agent exec compatibility, sandboxed Tasks и sessionless Jobs, а
 Uprava получает TUI-equivalent возможности через provider-native semantic
 protocol. Codex TUI не встраивается и не эмулируется в Web Control Panel.
 Нынешний `codex exec/resume` path сохраняется как явный unrestricted
-compatibility mode, но provider-native managed runtime должен стать default для
-новых Agent sessions.
+compatibility mode, а provider-native managed runtime является default для
+новых Agent sessions на capable Nodes.
 
 ### Task-based sandbox run
 
