@@ -247,6 +247,7 @@ async fn codex_resolve_approval_returns_runtime_to_ready() {
     let mut command = command_fixture("command-resolve", CommandKind::ResolveApproval);
     command.payload = CommandPayload::ResolveApproval {
         approval_id: ApprovalId::from("approval-1"),
+        provider_interaction_id: None,
         approved: true,
         message: Some("approved".to_owned()),
     };

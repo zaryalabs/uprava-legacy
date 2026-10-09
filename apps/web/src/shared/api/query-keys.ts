@@ -26,6 +26,8 @@ export const queryKeys = {
   workspaceTerminals: (placementId: string) =>
     ["placement", placementId, "workspace-terminals"] as const,
   session: (sessionThreadId: string) => ["session", sessionThreadId] as const,
+  sessionPolicyPreview: (placementId: string, executionProfile: string) =>
+    ["session-policy-preview", placementId, executionProfile] as const,
   sessionEvidenceProjection: (sessionThreadId: string) =>
     ["session", sessionThreadId, "evidence-projection"] as const,
   sessionTrace: (sessionThreadId: string) =>

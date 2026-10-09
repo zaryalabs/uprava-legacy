@@ -264,6 +264,19 @@ async fn background_job_is_paused_by_default_and_manual_overlap_is_visible() {
     .await
     .expect("overlap is retained")
     .0;
+    let job_runtime_profile: String = sqlx::query_scalar(
+        "select execution_profile from runtime_sessions where runtime_session_id = ?1",
+    )
+    .bind(
+        first
+            .runtime_session_id
+            .as_ref()
+            .expect("starting Job has a runtime session")
+            .as_str(),
+    )
+    .fetch_one(&state.pool)
+    .await
+    .expect("Job runtime profile loads");
     let _ = update_job_route(
         State(state.clone()),
         Path(created.job.job_id.to_string()),
@@ -281,6 +294,7 @@ async fn background_job_is_paused_by_default_and_manual_overlap_is_visible() {
     .expect("future configuration updates");
 
     assert_eq!(first.state, JobRunState::Starting);
+    assert_eq!(job_runtime_profile, "exec_compatibility");
     assert_eq!(second.state, JobRunState::Skipped);
     assert_eq!(
         second.terminal_reason.expect("skip reason exists").code,
@@ -559,6 +573,7 @@ async fn provider_quota_blocks_session_and_force_override_is_audited() {
         project_placement_id: detail.placement.project_placement_id.clone(),
         title: Some("Quota session".to_owned()),
         provider: "codex".to_owned(),
+        execution_profile: Some(AgentExecutionProfile::ExecCompatibility),
         force,
     };
 

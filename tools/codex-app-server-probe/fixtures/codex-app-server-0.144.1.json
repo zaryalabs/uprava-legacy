@@ -1,0 +1,103 @@
+{
+  "baseline": "codex-cli 0.144.1",
+  "transport": "loopback-websocket/json",
+  "clientRequests": [
+    {
+      "id": "<request-id>",
+      "method": "initialize",
+      "params": {
+        "clientInfo": {
+          "name": "uprava-provider-protocol-spike",
+          "version": "<probe-version>"
+        },
+        "capabilities": {
+          "experimentalApi": true
+        }
+      }
+    },
+    {
+      "id": "<request-id>",
+      "method": "turn/interrupt",
+      "params": {
+        "threadId": "<provider-thread-id>",
+        "turnId": "<provider-turn-id>"
+      }
+    }
+  ],
+  "serverRequests": [
+    {
+      "id": "<provider-request-id>",
+      "method": "item/commandExecution/requestApproval",
+      "params": {
+        "threadId": "<provider-thread-id>",
+        "turnId": "<provider-turn-id>",
+        "itemId": "<provider-item-id>",
+        "command": "<bounded-command>",
+        "cwd": "<workspace>"
+      },
+      "clientResponse": {
+        "id": "<provider-request-id>",
+        "result": {
+          "decision": "accept"
+        }
+      }
+    },
+    {
+      "id": "<provider-request-id>",
+      "method": "item/tool/requestUserInput",
+      "params": {
+        "threadId": "<provider-thread-id>",
+        "turnId": "<provider-turn-id>",
+        "itemId": "<provider-item-id>",
+        "questions": [
+          {
+            "id": "choice",
+            "header": "Choice",
+            "question": "Choose one",
+            "options": [
+              {
+                "label": "Alpha",
+                "description": "Fixture option"
+              }
+            ]
+          }
+        ]
+      },
+      "clientResponse": {
+        "id": "<provider-request-id>",
+        "result": {
+          "answers": {
+            "choice": {
+              "answers": [
+                "Alpha"
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
+  "effectivePolicies": {
+    "safe": {
+      "approvalPolicy": "untrusted",
+      "sandbox": {
+        "type": "workspaceWrite",
+        "writableRoots": [
+          "<workspace>"
+        ]
+      }
+    },
+    "unrestricted": {
+      "approvalPolicy": "never",
+      "sandbox": {
+        "type": "dangerFullAccess"
+      }
+    }
+  },
+  "redaction": {
+    "providerIds": "placeholder-only",
+    "codexHome": "omitted",
+    "mcpBearerToken": "omitted",
+    "rawEnvironment": "omitted"
+  }
+}

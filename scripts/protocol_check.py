@@ -26,6 +26,48 @@ WEB_FIXTURES = ROOT / "apps/web/src/shared/protocol/fixtures.json"
 
 ENUM_SPECS: list[tuple[str, str, str, str | None, str]] = [
     (
+        "AgentExecutionProfile",
+        "AgentExecutionProfile",
+        "snake_case",
+        None,
+        "AGENT_EXECUTION_PROFILE_VALUES",
+    ),
+    (
+        "RuntimeAttemptState",
+        "RuntimeAttemptState",
+        "snake_case",
+        None,
+        "RUNTIME_ATTEMPT_STATE_VALUES",
+    ),
+    (
+        "ProviderRuntimeCapability",
+        "ProviderRuntimeCapability",
+        "snake_case",
+        None,
+        "PROVIDER_RUNTIME_CAPABILITY_VALUES",
+    ),
+    (
+        "ProviderInteractionKind",
+        "ProviderInteractionKind",
+        "snake_case",
+        None,
+        "PROVIDER_INTERACTION_KIND_VALUES",
+    ),
+    (
+        "ProviderInteractionState",
+        "ProviderInteractionState",
+        "snake_case",
+        None,
+        "PROVIDER_INTERACTION_STATE_VALUES",
+    ),
+    (
+        "RuntimeRecoveryStatus",
+        "RuntimeRecoveryStatus",
+        "snake_case",
+        None,
+        "RUNTIME_RECOVERY_STATUS_VALUES",
+    ),
+    (
         "ActionCapability",
         "ActionCapability",
         "snake_case",

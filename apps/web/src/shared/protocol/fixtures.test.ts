@@ -25,6 +25,7 @@ describe("Rust-generated protocol fixtures", () => {
     ["workspace_terminal_list", workspaceTerminalListResponseSchema],
     ["workspace_terminal_stream", workspaceTerminalStreamFrameSchema],
     ["event_envelope", eventEnvelopeSchema],
+    ["managed_policy_event", eventEnvelopeSchema],
     ["artifact_detail", artifactDetailSchema],
     ["tooling_contract", toolingContractFixtureSchema],
     ["plugin_contract", pluginContractFixtureSchema],

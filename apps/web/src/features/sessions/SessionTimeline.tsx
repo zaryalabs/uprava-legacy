@@ -13,6 +13,7 @@ import {
   runWorkbenchCommand,
 } from "../../workbench/commands/registry";
 import { ReferenceActions } from "../../workbench/references/ReferenceActions";
+import { ProviderInteractionCards } from "./ProviderInteractionCards";
 import { buildSessionTimelineBlocks } from "./timeline-blocks";
 
 export function SessionTimeline({
@@ -58,6 +59,10 @@ export function SessionTimeline({
 
   return (
     <div className="space-y-3">
+      <ProviderInteractionCards
+        detail={detail}
+        availableCommands={availableCommands}
+      />
       {blocks.map(({ block, approvalId }) => (
         <TimelineBlockRenderer
           key={block.block_id}

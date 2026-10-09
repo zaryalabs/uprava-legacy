@@ -1838,6 +1838,8 @@ mod tests {
             state_path: root.join("node.sqlite"),
             workspace_paths: vec![root.clone()],
             codex_binary: "codex".to_owned(),
+            codex_version: Some("codex-cli 0.144.1".to_owned()),
+            codex_managed_unavailable_reason: None,
             codex_ignore_user_config: true,
             codex_timeout: Duration::from_secs(60),
             opensandbox_url: None,

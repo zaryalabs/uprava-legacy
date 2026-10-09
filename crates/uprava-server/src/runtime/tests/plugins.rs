@@ -40,7 +40,7 @@ async fn bundled_plugins_should_bootstrap_idempotently() {
         .fetch_one(&state.pool)
         .await
         .expect("migration version loads");
-    assert_eq!(latest_migration, 17);
+    assert_eq!(latest_migration, 19);
 }
 
 #[tokio::test]

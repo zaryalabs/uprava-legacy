@@ -56,12 +56,14 @@ id_type!(ProjectPlacementId);
 id_type!(ActorId);
 id_type!(SessionThreadId);
 id_type!(RuntimeSessionId);
+id_type!(RuntimeAttemptId);
 id_type!(TurnId);
 id_type!(MessageId);
 id_type!(CommandId);
 id_type!(TerminalId);
 id_type!(EventId);
 id_type!(ApprovalId);
+id_type!(ProviderInteractionId);
 id_type!(ArtifactId);
 id_type!(EvidenceId);
 id_type!(BlockId);
@@ -112,6 +114,12 @@ impl ActorRef {
 pub enum ScopeRef {
     Runtime {
         runtime_session_id: RuntimeSessionId,
+    },
+    RuntimeAttempt {
+        runtime_attempt_id: RuntimeAttemptId,
+    },
+    ProviderInteraction {
+        provider_interaction_id: ProviderInteractionId,
     },
     Session {
         session_thread_id: SessionThreadId,

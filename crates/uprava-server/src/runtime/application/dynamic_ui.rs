@@ -723,6 +723,7 @@ async fn execute_generated_ui_action(
                 session_thread_id.clone(),
                 SendTurnRequest {
                     content: request.content,
+                    collaboration_mode: None,
                 },
                 CorrelationId::new(),
             )

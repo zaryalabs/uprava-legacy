@@ -1,6 +1,12 @@
 # Uprava Legacy
 
-> Данный проект закрыт. Эксперимент успешен, но полноценная реализация будет производится с 0.
+Этот репозиторий сохраняет завершённую экспериментальную итерацию Uprava
+на baseline `0.2.26`, её исходный код, историю решений, ретроспективу и
+исследования для следующего старта. Проект Uprava продолжается; чистовая
+реализация будет развиваться отдельно с учётом полученного опыта.
+
+Порядок сохранения и границы снимка описаны в
+[паспорте сохранения](docs/retrospective/iteration-01/preservation.md).
 
 Uprava — распределённая агентская операционная система для масштабной работы с
 ИИ-агентами.
@@ -26,8 +32,10 @@ Uprava должна стать control plane и рабочей поверхно�
 - **Workspace-centered Web Control Panel** — общий workspace с поверхностями
   Agent, IDE-like Workbench и Jobs, условным Context Inspector, деревом файлов,
   лёгким редактированием текста, workspace-терминалами и diff.
-- **Run Mode и Agent Provider Adapter** — абстракции выполнения; сначала
-  управляемый Persistent Runtime для живой работы и Codex как первый провайдер.
+- **Managed Agent Work Loop и Agent Provider Adapter** — provider-native live
+  Codex session как основной Agent mode; текущий `codex exec/resume` остаётся
+  явным compatibility mode, а Tasks/Jobs используют отдельные one-shot
+  execution contracts.
 - **Distributed Runtime Coordination** — dispatch, порядок событий, размещение
   node/workspace и предупреждения о ресурсах между Core, Node Daemon и runtime.
 - **Agent Tooling, Tool Registry и Plugin Registry** — Core-owned capabilities,
@@ -37,7 +45,19 @@ Uprava должна стать control plane и рабочей поверхно�
 
 ## Текущее состояние
 
-Текущий baseline репозитория — `0.2.19` с task-based sandbox runtime:
+Текущий baseline репозитория — `0.2.26`. Он доводит Managed Agent Work Loop до
+deployment-ready состояния:
+Managed является capability-aware default для новых Agent sessions, Core не
+переходит в unrestricted Exec молча, existing sessions сохраняют stored
+profile, а Jobs и Tasks остаются на отдельных execution contracts. Host-only
+acceptance проверяет safe policy, approve/deny/input, interrupt, MCP, два
+Managed turn с detach/reattach, stop/resume и reload, а также явный Exec
+compatibility path. Managed MCP credential обновляется через native resume,
+idle expiry завершает Node process и отзывает lease, а workspace повторно
+проверяется на Node. Provider child process получает только allowlisted
+environment. Baseline наследует Web work
+surface `0.2.24`, Core orchestration `0.2.23`, Node-managed Codex runtime
+`0.2.22`, shared foundation `0.2.21`, protocol gate `0.2.20` и `0.2.19` с
 durable Task Runs, isolated Git worktrees, Docker/OpenSandbox lifecycle,
 bounded checks/evidence, cancellation/recovery и отдельная Tasks surface.
 Persistent Codex credential profile и OpenSandbox API key намеренно отложены
@@ -52,9 +72,17 @@ Extension Host и bundled Dark Theme, Agent Tooling,
 Git-aware Review, прозрачного live agent timeline, модульных Core/Node runtime
 boundaries, workspace-centered Web UI, Background Jobs и protocol v2.
 `V01` обозначает первый продуктовый срез, выпущенный как `0.1.0`. После него
-реализованы девятнадцать implementation slices, workspace-centered UI follow-up, единый
+реализовано двадцать шесть implementation slices, workspace-centered UI follow-up, единый
 hardening-аудит, renderer/PTY-срез workspace и первый baseline self-hosted
 CI/CD deployment и синхронизированными Linux visual baselines.
+
+Текущая итерация закрыта по решению владельца продукта. Опыт реализации,
+исследование современных подходов и рекомендации для нового старта собраны в
+[ретроспективе первой итерации](docs/retrospective/iteration-01/README.md).
+Следующая итерация начинается с узкого сценария управления облачными агентами,
+отзывчивого интерактивного чата и безопасности выбранного production-профиля.
+Прежние идеи, включая team/cloud и sessionless Jobs, сохранены для дальнейшего
+выбора; историческая feature queue не задаёт новый порядок реализации.
 
 Основные продуктовые и архитектурные документы:
 
@@ -64,6 +92,7 @@ CI/CD deployment и синхронизированными Linux visual baseline
 - [Системные направления](docs/systems/areas/)
 - [Task-based Sandbox Runtime](docs/systems/areas/013-task-based-sandbox-runtime.md)
 - [Task Sandbox Runtime Runbook](docs/runbooks/task-sandbox-runtime.md)
+- [Managed Agent Runtime Runbook](docs/runbooks/managed-agent-runtime.md)
 - [Версионирование](docs/versioning.md)
 - [Релизы](docs/releases.md)
 - [Очередь фич](docs/product/feature-queue.md)

@@ -4,11 +4,11 @@ use chrono::{TimeZone, Utc};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use uprava_protocol::{
-    compute_tool_schema_hash, ActorRef, ArtifactDetail, ArtifactId, ArtifactState, ArtifactSummary,
-    ArtifactVersion, CommandAcceptedResponse, CommandKind, CommandState,
-    ContributionResolutionMode, ContributionTarget, ContributionTargetResolution, CorrelationId,
-    EffectiveContribution, EffectiveContributionState, EventEnvelope, EventId, EventKind,
-    ExecuteToolRequest, ExecuteToolResponse, InspectToolRequest, InspectToolResponse,
+    compute_tool_schema_hash, ActorRef, AgentExecutionProfile, ArtifactDetail, ArtifactId,
+    ArtifactState, ArtifactSummary, ArtifactVersion, CommandAcceptedResponse, CommandKind,
+    CommandState, ContributionResolutionMode, ContributionTarget, ContributionTargetResolution,
+    CorrelationId, EffectiveContribution, EffectiveContributionState, EventEnvelope, EventId,
+    EventKind, ExecuteToolRequest, ExecuteToolResponse, InspectToolRequest, InspectToolResponse,
     IntegrationAuthState, IntegrationConnectRequest, IntegrationConnectResponse,
     IntegrationConnectionSummary, IntegrationConnectionsResponse, IntegrationDesiredState,
     IntegrationDisconnectRequest, IntegrationDisconnectResponse, McpAccessLeaseClaims,
@@ -17,9 +17,10 @@ use uprava_protocol::{
     ObservedCapabilityState, PluginCompatibility, PluginCompatibilityState, PluginContribution,
     PluginDesiredState, PluginEffectiveState, PluginId, PluginInstallSource,
     PluginInstallationSummary, PluginListResponse, PluginPackageSummary, PluginTrustLevel,
-    PolicyDecision, ProjectId, ProjectPlacementId, ScopeRef, SearchToolsRequest,
-    SearchToolsResponse, SessionThreadId, TerminalId, TerminalThemeV1, ThemeColorScheme,
-    ThemeContributionV1, ThemeKind, ToolAvailability, ToolAvailabilityResponse,
+    PolicyDecision, ProjectId, ProjectPlacementId, ProviderApprovalMode, ProviderRuntimeCapability,
+    ProviderSandboxMode, RuntimeNetworkPosture, RuntimeToolExposureSummary, ScopeRef,
+    SearchToolsRequest, SearchToolsResponse, SessionThreadId, TerminalId, TerminalThemeV1,
+    ThemeColorScheme, ThemeContributionV1, ThemeKind, ToolAvailability, ToolAvailabilityResponse,
     ToolAvailabilityState, ToolCallDetail, ToolCallId, ToolCallState, ToolCallSummary,
     ToolCallsResponse, ToolDefinition, ToolDefinitionState, ToolDefinitionsResponse,
     ToolExecutionKind, ToolId, ToolInvocationMode, ToolRedactionPolicy, ToolResultEnvelope,
@@ -161,6 +162,63 @@ fn main() {
             payload: uprava_protocol::EventPayload::from_json(
                 EventKind::RuntimeReady,
                 json!({ "provider": "fixture" }),
+            ),
+        },
+    );
+    let managed_policy = uprava_protocol::EffectiveRuntimePolicy {
+        contract_version: 1,
+        execution_profile: AgentExecutionProfile::Managed,
+        provider: "codex".to_owned(),
+        provider_version: Some("0.144.1".to_owned()),
+        provider_capabilities: ProviderRuntimeCapability::required_for_managed_codex().to_vec(),
+        sandbox_mode: ProviderSandboxMode::WorkspaceWrite,
+        approval_mode: ProviderApprovalMode::Untrusted,
+        workspace_root: "/workspace".to_owned(),
+        additional_writable_paths: Vec::new(),
+        network_posture: RuntimeNetworkPosture::Unsupported,
+        tool_exposure: RuntimeToolExposureSummary {
+            server_count: 1,
+            tool_count: 12,
+            server_names: vec!["uprava".to_owned()],
+        },
+        credential_profile_ref: Some("codex:default".to_owned()),
+        unsafe_override: None,
+        capability_metadata: BTreeMap::from([("transport".to_owned(), "app-server-v2".to_owned())]),
+    };
+    let managed_policy_hash = managed_policy
+        .policy_hash()
+        .expect("managed fixture policy hashes");
+    insert(
+        &mut fixtures,
+        "managed_policy_event",
+        EventEnvelope {
+            event_id: EventId::from("event-managed-policy-fixture"),
+            command_id: Some("command-managed-start-fixture".into()),
+            correlation_id: Some("correlation-managed-fixture".into()),
+            actor_ref: ActorRef::Node {
+                node_id: "node-fixture".into(),
+            },
+            scope_ref: ScopeRef::Runtime {
+                runtime_session_id: "runtime-managed-fixture".into(),
+            },
+            node_id: Some("node-fixture".into()),
+            runtime_session_id: Some("runtime-managed-fixture".into()),
+            session_thread_id: Some("session-managed-fixture".into()),
+            turn_id: None,
+            seq: 1,
+            session_projection_seq: Some(1),
+            kind: EventKind::RuntimePolicyEffective,
+            happened_at: at,
+            source_refs: vec![],
+            evidence_refs: vec![],
+            cause_refs: vec![],
+            result_refs: vec![],
+            payload: uprava_protocol::EventPayload::from_json(
+                EventKind::RuntimePolicyEffective,
+                json!({
+                    "policy": managed_policy,
+                    "policy_hash": managed_policy_hash,
+                }),
             ),
         },
     );
@@ -682,6 +740,7 @@ fn tooling_contract_fixture(
             issued_at: at,
             expires_at: at + chrono::Duration::minutes(10),
             credential_version: 1,
+            resume_command_id: None,
         },
         tool_definitions: ToolDefinitionsResponse {
             items: vec![definition],

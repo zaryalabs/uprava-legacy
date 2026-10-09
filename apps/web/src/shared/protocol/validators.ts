@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import {
+  AGENT_EXECUTION_PROFILE_VALUES,
   COMMAND_KIND_VALUES,
   COMMAND_STATE_VALUES,
   EVENT_KIND_VALUES,
@@ -11,6 +12,9 @@ import {
   OBSERVED_CAPABILITY_STATE_VALUES,
   PLACEMENT_STATE_VALUES,
   POLICY_DECISION_VALUES,
+  PROVIDER_INTERACTION_KIND_VALUES,
+  PROVIDER_RUNTIME_CAPABILITY_VALUES,
+  RUNTIME_ATTEMPT_STATE_VALUES,
   TOOL_AVAILABILITY_STATE_VALUES,
   TOOL_CALL_STATE_VALUES,
   TOOL_DEFINITION_STATE_VALUES,
@@ -495,6 +499,7 @@ const mcpAccessLeaseClaimsSchema = z
     issued_at: z.string(),
     expires_at: z.string(),
     credential_version: z.number().int().nonnegative(),
+    resume_command_id: nullableString,
   })
   .strict() satisfies z.ZodType<McpAccessLeaseClaims>;
 
@@ -849,6 +854,18 @@ const scopeRefSchema = z.discriminatedUnion("kind", [
     .object({ kind: z.literal("runtime"), runtime_session_id: z.string() })
     .strict(),
   z
+    .object({
+      kind: z.literal("runtime_attempt"),
+      runtime_attempt_id: z.string(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("provider_interaction"),
+      provider_interaction_id: z.string(),
+    })
+    .strict(),
+  z
     .object({ kind: z.literal("session"), session_thread_id: z.string() })
     .strict(),
   z.object({ kind: z.literal("node"), node_id: z.string() }).strict(),
@@ -1132,7 +1149,66 @@ const workspaceSnapshotEventFields = {
   ),
   git_snapshot: gitWorkspaceSnapshotSchema.nullable().optional(),
 };
+const effectiveRuntimePolicySchema = z
+  .object({
+    contract_version: z.number().int().positive(),
+    execution_profile: z.enum(AGENT_EXECUTION_PROFILE_VALUES),
+    provider: z.string(),
+    provider_version: nullableString,
+    provider_capabilities: z.array(z.enum(PROVIDER_RUNTIME_CAPABILITY_VALUES)),
+    sandbox_mode: z.enum([
+      "read-only",
+      "workspace-write",
+      "danger-full-access",
+    ]),
+    approval_mode: z.enum(["untrusted", "on_failure", "on_request", "never"]),
+    workspace_root: z.string(),
+    additional_writable_paths: z.array(z.string()),
+    network_posture: z.enum([
+      "denied",
+      "restricted",
+      "allowed",
+      "provider_default",
+      "unsupported",
+    ]),
+    tool_exposure: z
+      .object({
+        server_count: z.number().int().nonnegative(),
+        tool_count: z.number().int().nonnegative(),
+        server_names: z.array(z.string()),
+      })
+      .strict(),
+    credential_profile_ref: nullableString,
+    unsafe_override: z
+      .object({
+        actor: actorRefSchema,
+        reason: z.string(),
+        expires_at: z.string(),
+      })
+      .strict()
+      .nullable(),
+    capability_metadata: z.record(z.string(), z.string()),
+  })
+  .strict();
+const runtimeAttemptEventPayloadSchema = z
+  .object({
+    type: z.enum([
+      "runtime_attempt_started",
+      "runtime_attempt_ready",
+      "runtime_attempt_disconnected",
+      "runtime_attempt_reconnecting",
+      "runtime_attempt_recovered",
+      "runtime_attempt_failed",
+    ]),
+    runtime_attempt_id: z.string(),
+    state: z.enum(RUNTIME_ATTEMPT_STATE_VALUES),
+    reason: nullableString,
+    code: nullableString,
+    message: nullableString,
+  })
+  .strict();
 export const eventPayloadSchema = z.union([
+  runtimeAttemptEventPayloadSchema,
   runtimeStateEventPayloadSchema,
   z
     .object({
@@ -1152,6 +1228,26 @@ export const eventPayloadSchema = z.union([
     })
     .strict(),
   providerActivityEventPayloadSchema,
+  z
+    .object({
+      type: z.literal("provider_interaction_requested"),
+      provider_interaction_id: z.string(),
+      runtime_attempt_id: z.string(),
+      interaction_kind: z.enum(PROVIDER_INTERACTION_KIND_VALUES),
+      prompt: z.string(),
+      expires_at: nullableString,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("provider_interaction_resolved"),
+      provider_interaction_id: z.string(),
+      runtime_attempt_id: z.string(),
+      interaction_kind: z.enum(PROVIDER_INTERACTION_KIND_VALUES),
+      approved: z.boolean().nullable(),
+      answers: z.array(z.string()),
+    })
+    .strict(),
   z
     .object({ type: z.literal("provider_output_delta"), content: z.string() })
     .strict(),
@@ -1177,6 +1273,20 @@ export const eventPayloadSchema = z.union([
       approval_id: z.string(),
       approved: z.boolean(),
       message: z.string(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("runtime_policy_effective"),
+      policy: effectiveRuntimePolicySchema.nullable(),
+      policy_hash: nullableString,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("runtime_policy_override"),
+      policy_hash: nullableString,
+      policy_override: effectiveRuntimePolicySchema.shape.unsafe_override,
     })
     .strict(),
   z
@@ -1297,6 +1407,12 @@ export const eventPayloadSchema = z.union([
 ]) as z.ZodType<EventPayload>;
 
 const payloadTypeByEventKind: Record<EventKind, EventPayload["type"]> = {
+  "runtime.attempt.started": "runtime_attempt_started",
+  "runtime.attempt.ready": "runtime_attempt_ready",
+  "runtime.attempt.disconnected": "runtime_attempt_disconnected",
+  "runtime.attempt.reconnecting": "runtime_attempt_reconnecting",
+  "runtime.attempt.recovered": "runtime_attempt_recovered",
+  "runtime.attempt.failed": "runtime_attempt_failed",
   "runtime.starting": "runtime_starting",
   "runtime.ready": "runtime_ready",
   "runtime.running": "runtime_running",
@@ -1309,10 +1425,14 @@ const payloadTypeByEventKind: Record<EventKind, EventPayload["type"]> = {
   "turn.completed": "turn_completed",
   "turn.interrupted": "turn_interrupted",
   "provider.activity": "provider_activity",
+  "provider.interaction.requested": "provider_interaction_requested",
+  "provider.interaction.resolved": "provider_interaction_resolved",
   "provider.output.delta": "provider_output_delta",
   "provider.message.completed": "provider_message_completed",
   "approval.requested": "approval_requested",
   "approval.resolved": "approval_resolved",
+  "runtime.policy.effective": "runtime_policy_effective",
+  "runtime.policy.override": "runtime_policy_override",
   "coordination.warning_acknowledged": "coordination_warning_acknowledged",
   "workspace.validated": "workspace_validated",
   "resource.snapshot.updated": "resource_snapshot_updated",

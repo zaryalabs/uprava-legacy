@@ -21,23 +21,51 @@ pub enum CommandPayload {
     StartRuntime {
         provider: String,
         workspace_path: String,
+        #[serde(default)]
+        execution_profile: AgentExecutionProfile,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_policy: Option<EffectiveRuntimePolicy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_policy_hash: Option<RuntimePolicyHash>,
     },
     ResumeRuntime {
         provider: String,
         workspace_path: String,
         provider_resume_ref: Option<serde_json_value::JsonValue>,
+        #[serde(default)]
+        execution_profile: AgentExecutionProfile,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_policy: Option<EffectiveRuntimePolicy>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effective_policy_hash: Option<RuntimePolicyHash>,
     },
     SendTurn {
         content: String,
         turn_id: TurnId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        collaboration_mode: Option<String>,
     },
     ResolveApproval {
         approval_id: ApprovalId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_interaction_id: Option<ProviderInteractionId>,
         approved: bool,
         message: Option<String>,
     },
-    InterruptRuntime,
-    StopRuntime,
+    SubmitUserInput {
+        provider_interaction_id: ProviderInteractionId,
+        answers: Vec<String>,
+    },
+    InterruptRuntime {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_attempt_id: Option<RuntimeAttemptId>,
+    },
+    StopRuntime {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime_attempt_id: Option<RuntimeAttemptId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     ValidateWorkspace {
         display_name: String,
         workspace_path: String,
@@ -114,8 +142,9 @@ impl CommandPayload {
                 | (CommandKind::ResumeRuntime, Self::ResumeRuntime { .. })
                 | (CommandKind::SendTurn, Self::SendTurn { .. })
                 | (CommandKind::ResolveApproval, Self::ResolveApproval { .. })
-                | (CommandKind::InterruptRuntime, Self::InterruptRuntime)
-                | (CommandKind::StopRuntime, Self::StopRuntime)
+                | (CommandKind::SubmitUserInput, Self::SubmitUserInput { .. })
+                | (CommandKind::InterruptRuntime, Self::InterruptRuntime { .. })
+                | (CommandKind::StopRuntime, Self::StopRuntime { .. })
                 | (
                     CommandKind::ValidateWorkspace,
                     Self::ValidateWorkspace { .. }
@@ -398,6 +427,48 @@ pub struct ProviderActivityEventData {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventPayloadKind {
+    RuntimeAttemptStarted {
+        runtime_attempt_id: RuntimeAttemptId,
+        state: RuntimeAttemptState,
+        reason: Option<String>,
+        code: Option<String>,
+        message: Option<String>,
+    },
+    RuntimeAttemptReady {
+        runtime_attempt_id: RuntimeAttemptId,
+        state: RuntimeAttemptState,
+        reason: Option<String>,
+        code: Option<String>,
+        message: Option<String>,
+    },
+    RuntimeAttemptDisconnected {
+        runtime_attempt_id: RuntimeAttemptId,
+        state: RuntimeAttemptState,
+        reason: Option<String>,
+        code: Option<String>,
+        message: Option<String>,
+    },
+    RuntimeAttemptReconnecting {
+        runtime_attempt_id: RuntimeAttemptId,
+        state: RuntimeAttemptState,
+        reason: Option<String>,
+        code: Option<String>,
+        message: Option<String>,
+    },
+    RuntimeAttemptRecovered {
+        runtime_attempt_id: RuntimeAttemptId,
+        state: RuntimeAttemptState,
+        reason: Option<String>,
+        code: Option<String>,
+        message: Option<String>,
+    },
+    RuntimeAttemptFailed {
+        runtime_attempt_id: RuntimeAttemptId,
+        state: RuntimeAttemptState,
+        reason: Option<String>,
+        code: Option<String>,
+        message: Option<String>,
+    },
     RuntimeStarting {
         #[serde(flatten)]
         data: RuntimeStateEventData,
@@ -441,6 +512,20 @@ pub enum EventPayloadKind {
         #[serde(flatten)]
         data: ProviderActivityEventData,
     },
+    ProviderInteractionRequested {
+        provider_interaction_id: ProviderInteractionId,
+        runtime_attempt_id: RuntimeAttemptId,
+        interaction_kind: ProviderInteractionKind,
+        prompt: String,
+        expires_at: Option<DateTime<Utc>>,
+    },
+    ProviderInteractionResolved {
+        provider_interaction_id: ProviderInteractionId,
+        runtime_attempt_id: RuntimeAttemptId,
+        interaction_kind: ProviderInteractionKind,
+        approved: Option<bool>,
+        answers: Vec<String>,
+    },
     ProviderOutputDelta {
         content: String,
     },
@@ -458,6 +543,14 @@ pub enum EventPayloadKind {
         approval_id: ApprovalId,
         approved: bool,
         message: String,
+    },
+    RuntimePolicyEffective {
+        policy: Option<EffectiveRuntimePolicy>,
+        policy_hash: Option<RuntimePolicyHash>,
+    },
+    RuntimePolicyOverride {
+        policy_hash: Option<RuntimePolicyHash>,
+        policy_override: Option<RuntimePolicyOverride>,
     },
     CoordinationWarningAcknowledged {
         warning_kind: String,
@@ -557,6 +650,24 @@ impl EventPayload {
         matches!(
             (kind, &self.kind),
             (
+                EventKind::RuntimeAttemptStarted,
+                EventPayloadKind::RuntimeAttemptStarted { .. }
+            ) | (
+                EventKind::RuntimeAttemptReady,
+                EventPayloadKind::RuntimeAttemptReady { .. }
+            ) | (
+                EventKind::RuntimeAttemptDisconnected,
+                EventPayloadKind::RuntimeAttemptDisconnected { .. }
+            ) | (
+                EventKind::RuntimeAttemptReconnecting,
+                EventPayloadKind::RuntimeAttemptReconnecting { .. }
+            ) | (
+                EventKind::RuntimeAttemptRecovered,
+                EventPayloadKind::RuntimeAttemptRecovered { .. }
+            ) | (
+                EventKind::RuntimeAttemptFailed,
+                EventPayloadKind::RuntimeAttemptFailed { .. }
+            ) | (
                 EventKind::RuntimeStarting,
                 EventPayloadKind::RuntimeStarting { .. }
             ) | (
@@ -591,6 +702,14 @@ impl EventPayload {
                     EventPayloadKind::ProviderActivity { .. }
                 )
                 | (
+                    EventKind::ProviderInteractionRequested,
+                    EventPayloadKind::ProviderInteractionRequested { .. }
+                )
+                | (
+                    EventKind::ProviderInteractionResolved,
+                    EventPayloadKind::ProviderInteractionResolved { .. }
+                )
+                | (
                     EventKind::ProviderOutputDelta,
                     EventPayloadKind::ProviderOutputDelta { .. }
                 )
@@ -605,6 +724,14 @@ impl EventPayload {
                 | (
                     EventKind::ApprovalResolved,
                     EventPayloadKind::ApprovalResolved { .. }
+                )
+                | (
+                    EventKind::RuntimePolicyEffective,
+                    EventPayloadKind::RuntimePolicyEffective { .. }
+                )
+                | (
+                    EventKind::RuntimePolicyOverride,
+                    EventPayloadKind::RuntimePolicyOverride { .. }
                 )
                 | (
                     EventKind::CoordinationWarningAcknowledged,
@@ -671,7 +798,80 @@ impl EventPayload {
                 .unwrap_or_default()
                 .to_owned()
         };
+        let attempt_fields = || {
+            (
+                RuntimeAttemptId::from(text("runtime_attempt_id")),
+                value
+                    .get("state")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .unwrap_or(RuntimeAttemptState::Failed),
+                optional_text(&value, "reason"),
+                optional_text(&value, "code"),
+                optional_text(&value, "message"),
+            )
+        };
         let payload = match kind {
+            EventKind::RuntimeAttemptStarted => {
+                let (runtime_attempt_id, state, reason, code, message) = attempt_fields();
+                EventPayloadKind::RuntimeAttemptStarted {
+                    runtime_attempt_id,
+                    state,
+                    reason,
+                    code,
+                    message,
+                }
+            }
+            EventKind::RuntimeAttemptReady => {
+                let (runtime_attempt_id, state, reason, code, message) = attempt_fields();
+                EventPayloadKind::RuntimeAttemptReady {
+                    runtime_attempt_id,
+                    state,
+                    reason,
+                    code,
+                    message,
+                }
+            }
+            EventKind::RuntimeAttemptDisconnected => {
+                let (runtime_attempt_id, state, reason, code, message) = attempt_fields();
+                EventPayloadKind::RuntimeAttemptDisconnected {
+                    runtime_attempt_id,
+                    state,
+                    reason,
+                    code,
+                    message,
+                }
+            }
+            EventKind::RuntimeAttemptReconnecting => {
+                let (runtime_attempt_id, state, reason, code, message) = attempt_fields();
+                EventPayloadKind::RuntimeAttemptReconnecting {
+                    runtime_attempt_id,
+                    state,
+                    reason,
+                    code,
+                    message,
+                }
+            }
+            EventKind::RuntimeAttemptRecovered => {
+                let (runtime_attempt_id, state, reason, code, message) = attempt_fields();
+                EventPayloadKind::RuntimeAttemptRecovered {
+                    runtime_attempt_id,
+                    state,
+                    reason,
+                    code,
+                    message,
+                }
+            }
+            EventKind::RuntimeAttemptFailed => {
+                let (runtime_attempt_id, state, reason, code, message) = attempt_fields();
+                EventPayloadKind::RuntimeAttemptFailed {
+                    runtime_attempt_id,
+                    state,
+                    reason,
+                    code,
+                    message,
+                }
+            }
             EventKind::RuntimeStarting => EventPayloadKind::RuntimeStarting { data: runtime() },
             EventKind::RuntimeReady => EventPayloadKind::RuntimeReady { data: runtime() },
             EventKind::RuntimeRunning => EventPayloadKind::RuntimeRunning { data: runtime() },
@@ -724,6 +924,43 @@ impl EventPayload {
                 }
                 EventPayloadKind::ProviderActivity { data }
             }
+            EventKind::ProviderInteractionRequested => {
+                EventPayloadKind::ProviderInteractionRequested {
+                    provider_interaction_id: ProviderInteractionId::from(text(
+                        "provider_interaction_id",
+                    )),
+                    runtime_attempt_id: RuntimeAttemptId::from(text("runtime_attempt_id")),
+                    interaction_kind: value
+                        .get("interaction_kind")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .unwrap_or(ProviderInteractionKind::Approval),
+                    prompt: text("prompt"),
+                    expires_at: value
+                        .get("expires_at")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok()),
+                }
+            }
+            EventKind::ProviderInteractionResolved => {
+                EventPayloadKind::ProviderInteractionResolved {
+                    provider_interaction_id: ProviderInteractionId::from(text(
+                        "provider_interaction_id",
+                    )),
+                    runtime_attempt_id: RuntimeAttemptId::from(text("runtime_attempt_id")),
+                    interaction_kind: value
+                        .get("interaction_kind")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .unwrap_or(ProviderInteractionKind::Approval),
+                    approved: value.get("approved").and_then(serde_json::Value::as_bool),
+                    answers: value
+                        .get("answers")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .unwrap_or_default(),
+                }
+            }
             EventKind::ProviderOutputDelta => EventPayloadKind::ProviderOutputDelta {
                 content: text("content"),
             },
@@ -744,6 +981,26 @@ impl EventPayload {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false),
                 message: text("message"),
+            },
+            EventKind::RuntimePolicyEffective => EventPayloadKind::RuntimePolicyEffective {
+                policy: value
+                    .get("policy")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
+                policy_hash: value
+                    .get("policy_hash")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
+            },
+            EventKind::RuntimePolicyOverride => EventPayloadKind::RuntimePolicyOverride {
+                policy_hash: value
+                    .get("policy_hash")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
+                policy_override: value
+                    .get("policy_override")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
             },
             EventKind::CoordinationWarningAcknowledged => {
                 EventPayloadKind::CoordinationWarningAcknowledged {
@@ -947,6 +1204,8 @@ pub enum ControlFrame {
         node_id: NodeId,
         daemon_version: String,
         active_runtime_ids: Vec<RuntimeSessionId>,
+        #[serde(default)]
+        actual_runtime_attempts: Vec<RuntimeAttemptActualState>,
     },
     HelloAck {
         frame_id: String,

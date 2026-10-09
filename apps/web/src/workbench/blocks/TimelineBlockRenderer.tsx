@@ -48,6 +48,7 @@ const rendererRegistrations: BlockRendererRegistration[] = [
   register("core.warning", WarningBlock),
   register("core.error", ErrorBlock),
   register("core.approval-request", ApprovalBlock),
+  register("core.provider-interaction", ProviderInteractionBlock),
   register("core.unknown", UnknownBlock),
 ];
 
@@ -227,6 +228,47 @@ function ApprovalBlock({ block, actions }: BlockRendererProps) {
           <dd className="text-[var(--color-ink)]">Review before approval</dd>
         </div>
       </dl>
+      <BlockActions actions={actions} />
+    </article>
+  );
+}
+
+function ProviderInteractionBlock({ block, actions }: BlockRendererProps) {
+  const data = blockData(block);
+  const kind = stringField(data, "interactionKind", "approval");
+  const state = stringField(data, "state", "requested");
+  const question = kind === "user_input";
+  const resolved = state === "resolved";
+  const approved = booleanField(data, "approved", false);
+  const answered = booleanField(data, "answered", false);
+  const terminalLabel = question
+    ? answered
+      ? "Answer received"
+      : "Question closed"
+    : approved
+      ? "Approved"
+      : "Denied";
+
+  return (
+    <article className="border-l-2 border-[var(--color-notice)] py-3 pl-3">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <Badge tone={resolved ? "neutral" : "warn"}>
+          {question ? (
+            <HelpCircle size={13} aria-hidden="true" />
+          ) : (
+            <CircleDot size={13} aria-hidden="true" />
+          )}
+          {question ? "Provider question" : "Provider approval"}
+        </Badge>
+        <span className="text-xs text-[var(--color-muted)]">
+          {resolved ? terminalLabel : "Waiting for your decision"}
+        </span>
+      </div>
+      {stringField(data, "prompt", "") ? (
+        <p className="whitespace-pre-wrap break-words text-sm">
+          {stringField(data, "prompt", "")}
+        </p>
+      ) : null}
       <BlockActions actions={actions} />
     </article>
   );

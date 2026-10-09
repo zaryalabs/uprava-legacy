@@ -210,6 +210,7 @@ pub enum CommandKind {
     ResumeRuntime,
     SendTurn,
     ResolveApproval,
+    SubmitUserInput,
     InterruptRuntime,
     StopRuntime,
     ValidateWorkspace,
@@ -248,6 +249,8 @@ pub enum ActionCapability {
     RuntimeResume,
     #[serde(rename = "approval.resolve")]
     ApprovalResolve,
+    #[serde(rename = "providerInteraction.submitInput")]
+    ProviderInteractionSubmitInput,
     #[serde(rename = "warning.acknowledge")]
     WarningAcknowledge,
     #[serde(rename = "reference.openInInspector")]
@@ -261,6 +264,18 @@ pub enum ActionCapability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    #[serde(rename = "runtime.attempt.started")]
+    RuntimeAttemptStarted,
+    #[serde(rename = "runtime.attempt.ready")]
+    RuntimeAttemptReady,
+    #[serde(rename = "runtime.attempt.disconnected")]
+    RuntimeAttemptDisconnected,
+    #[serde(rename = "runtime.attempt.reconnecting")]
+    RuntimeAttemptReconnecting,
+    #[serde(rename = "runtime.attempt.recovered")]
+    RuntimeAttemptRecovered,
+    #[serde(rename = "runtime.attempt.failed")]
+    RuntimeAttemptFailed,
     #[serde(rename = "runtime.starting")]
     RuntimeStarting,
     #[serde(rename = "runtime.ready")]
@@ -285,6 +300,10 @@ pub enum EventKind {
     TurnInterrupted,
     #[serde(rename = "provider.activity")]
     ProviderActivity,
+    #[serde(rename = "provider.interaction.requested")]
+    ProviderInteractionRequested,
+    #[serde(rename = "provider.interaction.resolved")]
+    ProviderInteractionResolved,
     #[serde(rename = "provider.output.delta")]
     ProviderOutputDelta,
     #[serde(rename = "provider.message.completed")]
@@ -293,6 +312,10 @@ pub enum EventKind {
     ApprovalRequested,
     #[serde(rename = "approval.resolved")]
     ApprovalResolved,
+    #[serde(rename = "runtime.policy.effective")]
+    RuntimePolicyEffective,
+    #[serde(rename = "runtime.policy.override")]
+    RuntimePolicyOverride,
     #[serde(rename = "coordination.warning_acknowledged")]
     CoordinationWarningAcknowledged,
     #[serde(rename = "workspace.validated")]

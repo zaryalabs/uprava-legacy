@@ -42,17 +42,19 @@ use uprava_logging::init_tracing;
 #[cfg(test)]
 use uprava_protocol::CommandTarget;
 use uprava_protocol::{
-    is_supported_protocol_version, serde_json_value::JsonValue, ActorRef, ApiError, ApprovalId,
-    CapabilitySummary, CapabilityValue, CommandEnvelope, CommandId, CommandKind, CommandPayload,
-    CommandState, ControlFrame, CorrelationId, DeductionInputPackage, DeductionProviderOutput,
-    DeductionProviderResult, EnrollmentId, EventEnvelope, EventId, EventKind, EventPayload,
-    GitChangeKind, GitChangedFile, GitHeadState, GitOperation, GitRepositoryState,
-    GitWorkspaceSnapshot, GitWorktreeKind, IntegrationDesiredState, IntegrationId,
-    McpDependencyActualState, McpDependencyInstanceId, McpDependencyStatus,
+    is_supported_protocol_version, serde_json_value::JsonValue, ActorRef, AgentExecutionProfile,
+    ApiError, ApprovalId, CapabilitySummary, CapabilityValue, CommandEnvelope, CommandId,
+    CommandKind, CommandPayload, CommandState, ControlFrame, CorrelationId, DeductionInputPackage,
+    DeductionProviderOutput, DeductionProviderResult, EnrollmentId, EventEnvelope, EventId,
+    EventKind, EventPayload, GitChangeKind, GitChangedFile, GitHeadState, GitOperation,
+    GitRepositoryState, GitWorkspaceSnapshot, GitWorktreeKind, IntegrationDesiredState,
+    IntegrationId, McpDependencyActualState, McpDependencyInstanceId, McpDependencyStatus,
     NodeEnrollmentClaimRequest, NodeEnrollmentClaimResponse, NodeEnrollmentRequest,
     NodeEnrollmentRequestedResponse, NodeHeartbeatRequest, NodeHeartbeatResponse, NodeId,
     ObservedCapability, ObservedCapabilityState, PlacementState, PolicyDecision,
-    ProjectPlacementId, ProviderMcpAccess, ProviderMcpAccessRequest, ResourceBadge,
+    ProjectPlacementId, ProviderInteractionId, ProviderInteractionKind, ProviderMcpAccess,
+    ProviderMcpAccessRequest, ProviderRuntimeCapability, ProviderSandboxMode, ResourceBadge,
+    RuntimeAttemptActualState, RuntimeAttemptId, RuntimeAttemptState, RuntimePolicyHash,
     RuntimeSessionId, RuntimeSessionState, ScheduledMessageFailure, ScopeRef, SessionThreadId,
     SleepHint, TaskArtifactEvidence, TaskCheckResult, TaskCleanupState, TaskRunResultPackage,
     TaskRunSpec, TaskRunState, TerminalId, TextRange, ToolCallId, ToolDefinition,
@@ -79,6 +81,7 @@ mod config;
 mod supervisor;
 
 mod application;
+mod managed_provider;
 mod persistence;
 mod provider;
 mod support;
@@ -89,6 +92,7 @@ mod transport;
 mod workspace;
 
 use application::*;
+use managed_provider::*;
 use persistence::*;
 use provider::*;
 use support::*;
@@ -165,10 +169,11 @@ pub async fn run() -> anyhow::Result<()> {
 
     let config = NodeConfig::from_env()?;
     let client = reqwest::Client::new();
-    let state_store = NodeStateStore::new(
-        NodeLocalState::load_async(&config.state_path).await?,
-        config.state_path.clone(),
-    );
+    let mut local_state = NodeLocalState::load_async(&config.state_path).await?;
+    if reconcile_managed_attempt_descriptors(&mut local_state) {
+        local_state.save_async(&config.state_path).await?;
+    }
+    let state_store = NodeStateStore::new(local_state, config.state_path.clone());
     tracing::info!("starting uprava node");
 
     NodeSupervisor::new(config, client, state_store).run().await

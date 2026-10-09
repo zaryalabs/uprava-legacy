@@ -136,6 +136,37 @@ export function blockFromEvent(
   event: EventEnvelope,
   options: { pendingApprovals?: Set<string> } = {},
 ): TimelineBlockItem {
+  if (
+    event.payload.type === "provider_interaction_requested" ||
+    event.payload.type === "provider_interaction_resolved"
+  ) {
+    const payload = event.payload;
+    const requested = payload.type === "provider_interaction_requested";
+    return {
+      block: baseBlock({
+        blockId: `event:${event.event_id}`,
+        type: "core.provider-interaction",
+        primaryRef: {
+          kind: "provider_interaction",
+          provider_interaction_id: payload.provider_interaction_id,
+        },
+        sourceRefs: [eventRef(event)],
+        data: {
+          providerInteractionId: payload.provider_interaction_id,
+          interactionKind: payload.interaction_kind,
+          prompt: requested ? payload.prompt : null,
+          state: requested ? "requested" : "resolved",
+          approved: requested ? null : payload.approved,
+          answered: requested ? false : payload.answers.length > 0,
+          seq: event.seq,
+          happenedAt: event.happened_at,
+        },
+        fallbackText: requested
+          ? payload.prompt
+          : `Provider ${payload.interaction_kind} resolved`,
+      }),
+    };
+  }
   const approvalId = approvalIdFromEvent(event);
   if (approvalId) {
     const pending = options.pendingApprovals?.has(approvalId) ?? true;

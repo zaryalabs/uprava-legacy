@@ -1172,6 +1172,8 @@ mod tests {
             state_path: std::env::temp_dir().join("uprava-tooling-test.sqlite3"),
             workspace_paths: vec![std::env::temp_dir()],
             codex_binary: "missing-codex".to_owned(),
+            codex_version: None,
+            codex_managed_unavailable_reason: Some("binary_not_found".to_owned()),
             codex_ignore_user_config: false,
             codex_timeout: Duration::from_secs(5),
             opensandbox_url: None,

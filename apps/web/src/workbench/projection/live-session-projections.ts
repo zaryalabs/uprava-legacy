@@ -22,6 +22,8 @@ const AGENT_REFRESH_EVENT_KINDS = new Set<EventEnvelope["kind"]>([
   "turn.interrupted",
   "approval.requested",
   "approval.resolved",
+  "provider.interaction.requested",
+  "provider.interaction.resolved",
   "coordination.warning_acknowledged",
   "workspace.validated",
   "resource.snapshot.updated",
@@ -32,6 +34,8 @@ const CANONICAL_PROJECTION_EVENT_KINDS = new Set<EventEnvelope["kind"]>([
   "runtime.error",
   "approval.requested",
   "approval.resolved",
+  "provider.interaction.requested",
+  "provider.interaction.resolved",
 ]);
 
 export function applyLiveSessionProjections(

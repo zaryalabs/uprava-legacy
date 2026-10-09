@@ -55,7 +55,16 @@ pub(crate) async fn require_mcp_lease(
                 .core_metrics
                 .mcp_lease_rejections
                 .fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(error_code = ?error.code, "Uprava MCP lease rejected");
+            let presented_lease_id = access_token
+                .split_once('.')
+                .map(|(lease_id, _)| lease_id)
+                .unwrap_or("invalid");
+            tracing::warn!(
+                error_code = ?error.code,
+                error_message = %error.message,
+                presented_lease_id,
+                "Uprava MCP lease rejected"
+            );
             AppError::auth("mcp_lease.invalid", "Invalid or expired Uprava MCP lease")
                 .into_response()
         }

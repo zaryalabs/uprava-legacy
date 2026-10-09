@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import type { NodeSummary } from "../../shared/protocol/types";
 import {
+  defaultExecutionProfile,
+  executionProfileOptions,
+  managedUnavailableMessage,
   providerChoiceOptions,
   startUnavailableReasonFor,
 } from "../sessions/StartSessionControl";
@@ -27,6 +30,56 @@ describe("providerChoiceOptions", () => {
         ]),
       ),
     ).toEqual([{ id: "codex", label: "Codex", available: true }]);
+  });
+});
+
+describe("executionProfileOptions", () => {
+  it("recommends managed only when the Node reports the capability", () => {
+    const options = executionProfileOptions(
+      nodeWithCapabilities([
+        { key: "provider.codex", value: providerCapability(true) },
+        {
+          key: "provider.codex.exec",
+          value: { ...providerCapability(true), mode: "exec_compatibility" },
+        },
+        {
+          key: "provider.codex.managed",
+          value: { ...providerCapability(true), mode: "managed" },
+        },
+      ]),
+      "codex",
+    );
+
+    expect(
+      options.map(({ id, available, recommended }) => ({
+        id,
+        available,
+        recommended,
+      })),
+    ).toEqual([
+      { id: "managed", available: true, recommended: true },
+      { id: "exec_compatibility", available: true, recommended: false },
+    ]);
+  });
+
+  it("turns typed managed capability failures into actionable copy", () => {
+    expect(managedUnavailableMessage("version_unsupported")).toContain(
+      "supported Codex version",
+    );
+  });
+
+  it("defaults capable Nodes to Managed and keeps incapable Nodes explicit", () => {
+    const capable = nodeWithCapabilities([
+      {
+        key: "provider.codex.managed",
+        value: { ...providerCapability(true), mode: "managed" },
+      },
+    ]);
+
+    expect(defaultExecutionProfile(capable, "codex")).toBe("managed");
+    expect(defaultExecutionProfile(undefined, "codex")).toBe(
+      "exec_compatibility",
+    );
   });
 });
 

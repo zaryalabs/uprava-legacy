@@ -1,9 +1,12 @@
 import type {
   EventEnvelope,
+  EventPayload,
   Message,
   MessageRole,
   PlacementState,
+  ProviderInteractionSummary,
   ResourceBadge,
+  RuntimeSummary,
   RuntimeSessionState,
   SessionDetail,
   SessionThreadState,
@@ -47,6 +50,11 @@ function applyContiguousEvent(
   const runtimeState = runtimeStateForEvent(event.kind);
   const sessionState = sessionStateForEvent(event.kind, detail.session.state);
   const placementUpdate = placementUpdateFromEvent(event);
+  const runtimeUpdate = runtimeUpdateFromEvent(event, detail.session.runtime);
+  const pendingInteractions = pendingInteractionsAfterEvent(
+    detail.pending_interactions ?? [],
+    event,
+  );
 
   return {
     ...detail,
@@ -65,11 +73,128 @@ function applyContiguousEvent(
         ...detail.session.runtime,
         state: runtimeState ?? detail.session.runtime.state,
         last_runtime_step_at: event.happened_at,
+        ...runtimeUpdate,
       },
     },
     messages,
     events: [...detail.events, event],
+    pending_interactions: pendingInteractions,
   };
+}
+
+function runtimeUpdateFromEvent(
+  event: EventEnvelope,
+  runtime: RuntimeSummary,
+): Partial<RuntimeSummary> {
+  const payload = event.payload;
+  if (payload.type === "runtime_policy_effective") {
+    return {
+      effective_policy: payload.policy,
+      effective_policy_hash: payload.policy_hash,
+    };
+  }
+  if (!isRuntimeAttemptPayload(payload)) return {};
+
+  const current =
+    runtime.current_attempt?.runtime_attempt_id === payload.runtime_attempt_id
+      ? runtime.current_attempt
+      : null;
+  const terminal =
+    payload.state === "stopped" ||
+    payload.state === "failed" ||
+    payload.state === "lost";
+  return {
+    current_attempt: {
+      runtime_attempt_id: payload.runtime_attempt_id,
+      state: payload.state,
+      started_at: current?.started_at ?? event.happened_at,
+      ready_at:
+        payload.type === "runtime_attempt_ready" ||
+        payload.type === "runtime_attempt_recovered"
+          ? event.happened_at
+          : (current?.ready_at ?? null),
+      stopped_at: terminal ? event.happened_at : (current?.stopped_at ?? null),
+      start_reason: current?.start_reason ?? payload.reason ?? "provider_event",
+      stop_reason: terminal
+        ? (payload.reason ?? payload.code ?? payload.message)
+        : (current?.stop_reason ?? null),
+      recovery_reason:
+        payload.type === "runtime_attempt_disconnected" ||
+        payload.type === "runtime_attempt_reconnecting" ||
+        payload.type === "runtime_attempt_recovered" ||
+        payload.type === "runtime_attempt_failed"
+          ? (payload.reason ?? payload.code ?? payload.message)
+          : (current?.recovery_reason ?? null),
+    },
+    recovery_status: recoveryStatusForAttemptEvent(payload.type),
+  };
+}
+
+function recoveryStatusForAttemptEvent(
+  type: RuntimeAttemptEventPayload["type"],
+): RuntimeSummary["recovery_status"] {
+  switch (type) {
+    case "runtime_attempt_ready":
+      return "live";
+    case "runtime_attempt_disconnected":
+      return "degraded";
+    case "runtime_attempt_reconnecting":
+      return "reconnecting";
+    case "runtime_attempt_recovered":
+      return "recovered";
+    case "runtime_attempt_failed":
+      return "failed";
+    default:
+      return "not_required";
+  }
+}
+
+type RuntimeAttemptEventPayload = Extract<
+  EventPayload,
+  { runtime_attempt_id: string; state: string }
+>;
+
+function isRuntimeAttemptPayload(
+  payload: EventPayload,
+): payload is RuntimeAttemptEventPayload {
+  return "runtime_attempt_id" in payload && "state" in payload;
+}
+
+function pendingInteractionsAfterEvent(
+  current: ProviderInteractionSummary[],
+  event: EventEnvelope,
+) {
+  const payload = event.payload;
+  if (payload.type === "provider_interaction_requested") {
+    if (
+      current.some(
+        (interaction) =>
+          interaction.provider_interaction_id ===
+          payload.provider_interaction_id,
+      )
+    ) {
+      return current;
+    }
+    return [
+      ...current,
+      {
+        provider_interaction_id: payload.provider_interaction_id,
+        runtime_attempt_id: payload.runtime_attempt_id,
+        kind: payload.interaction_kind,
+        state: "requested" as const,
+        prompt: payload.prompt,
+        requested_at: event.happened_at,
+        resolved_at: null,
+      },
+    ];
+  }
+  if (payload.type === "provider_interaction_resolved") {
+    return current.filter(
+      (interaction) =>
+        interaction.provider_interaction_id !== payload.provider_interaction_id,
+    );
+  }
+  return current;
 }
 
 function appendEventMessage(
@@ -133,6 +258,7 @@ function runtimeStateForEvent(kind: string): RuntimeSessionState | null {
       return "running";
     case "runtime.blocked":
     case "approval.requested":
+    case "provider.interaction.requested":
       return "blocked";
     case "runtime.expired":
       return "expired";
@@ -161,6 +287,8 @@ function sessionStateForEvent(
     kind === "runtime.running" ||
     kind === "approval.requested" ||
     kind === "approval.resolved" ||
+    kind === "provider.interaction.requested" ||
+    kind === "provider.interaction.resolved" ||
     kind === "turn.started" ||
     kind === "turn.completed" ||
     kind === "turn.interrupted"

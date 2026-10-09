@@ -81,6 +81,64 @@
     "source_refs": [],
     "turn_id": null
   },
+  "managed_policy_event": {
+    "actor_ref": {
+      "kind": "node",
+      "node_id": "node-fixture"
+    },
+    "cause_refs": [],
+    "command_id": "command-managed-start-fixture",
+    "correlation_id": "correlation-managed-fixture",
+    "event_id": "event-managed-policy-fixture",
+    "evidence_refs": [],
+    "happened_at": "2026-07-10T12:00:00Z",
+    "kind": "runtime.policy.effective",
+    "node_id": "node-fixture",
+    "payload": {
+      "policy": {
+        "additional_writable_paths": [],
+        "approval_mode": "untrusted",
+        "capability_metadata": {
+          "transport": "app-server-v2"
+        },
+        "contract_version": 1,
+        "credential_profile_ref": "codex:default",
+        "execution_profile": "managed",
+        "network_posture": "unsupported",
+        "provider": "codex",
+        "provider_capabilities": [
+          "provider.codex.managed",
+          "provider.codex.managed.approval",
+          "provider.codex.managed.interrupt",
+          "provider.codex.managed.resume"
+        ],
+        "provider_version": "0.144.1",
+        "sandbox_mode": "workspace-write",
+        "tool_exposure": {
+          "server_count": 1,
+          "server_names": [
+            "uprava"
+          ],
+          "tool_count": 12
+        },
+        "unsafe_override": null,
+        "workspace_root": "/workspace"
+      },
+      "policy_hash": "sha256:7d42e906458ed06feb30cc55ab1553482ee55d8b2c06e9be08bc3ff5f6f4b58b",
+      "type": "runtime_policy_effective"
+    },
+    "result_refs": [],
+    "runtime_session_id": "runtime-managed-fixture",
+    "scope_ref": {
+      "kind": "runtime",
+      "runtime_session_id": "runtime-managed-fixture"
+    },
+    "seq": 1,
+    "session_projection_seq": 1,
+    "session_thread_id": "session-managed-fixture",
+    "source_refs": [],
+    "turn_id": null
+  },
   "plugin_contract": {
     "effective_snapshot": {
       "contributions": [
@@ -735,6 +793,7 @@
       "node_id": "node-fixture",
       "project_id": "project-fixture",
       "project_placement_id": "placement-fixture",
+      "resume_command_id": null,
       "session_thread_id": "session-fixture"
     },
     "node_command": {

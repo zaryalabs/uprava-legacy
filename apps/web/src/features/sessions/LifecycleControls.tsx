@@ -8,6 +8,7 @@ import type {
   SessionSummary,
 } from "../../shared/protocol/types";
 import { Button } from "../../shared/ui/button";
+import { ErrorNotice } from "../../shared/ui/error-notice";
 import {
   canRunCommand,
   runWorkbenchCommand,
@@ -46,22 +47,37 @@ export function LifecycleControls({
   });
   const controls = lifecycleControlStates(context, command.isPending);
 
+  const resume = controls.find((control) => control.id === "runtime.resume");
+
   return (
-    <div className="flex flex-wrap gap-2">
-      {controls.map((control) => {
-        const Icon = control.icon;
-        return (
-          <Button
-            key={control.id}
-            variant={control.variant}
-            disabled={!control.enabled}
-            onClick={() => command.mutate(control.id)}
-          >
-            <Icon size={15} />
-            {control.label}
-          </Button>
-        );
-      })}
+    <div className="grid justify-items-start gap-2 md:justify-items-end">
+      <div className="flex flex-wrap gap-2">
+        {controls.map((control) => {
+          const Icon = control.icon;
+          return (
+            <Button
+              key={control.id}
+              variant={control.variant}
+              disabled={!control.enabled}
+              onClick={() => command.mutate(control.id)}
+            >
+              <Icon size={15} aria-hidden="true" />
+              {control.label}
+            </Button>
+          );
+        })}
+      </div>
+      {resume?.enabled ? (
+        <p className="max-w-sm text-xs text-[var(--color-muted)]">
+          Resume uses policy {shortPolicyHash(runtime.effective_policy_hash)}.
+          {runtime.current_attempt?.recovery_reason || runtime.degraded_reason
+            ? ` Recovery: ${runtime.current_attempt?.recovery_reason ?? runtime.degraded_reason}.`
+            : " No policy drift is reported."}
+        </p>
+      ) : null}
+      {command.isError ? (
+        <ErrorNotice error={command.error} title="Lifecycle command failed" />
+      ) : null}
     </div>
   );
 }
@@ -85,7 +101,7 @@ export function lifecycleControlStates(
   context: WorkbenchCommandContext,
   pending = false,
 ): LifecycleControlState[] {
-  return [
+  const controls: LifecycleControlState[] = [
     {
       id: "session.attach",
       label: "Attach",
@@ -100,7 +116,7 @@ export function lifecycleControlStates(
     },
     {
       id: "runtime.interrupt",
-      label: "Cancel",
+      label: "Interrupt",
       enabled: !pending && canRunCommand("runtime.interrupt", context),
       icon: Pause,
       variant: "danger",
@@ -119,4 +135,14 @@ export function lifecycleControlStates(
       icon: context.runtime?.resume_supported ? RotateCcw : Play,
     },
   ];
+  return controls.filter(
+    (control) =>
+      control.id !== "runtime.interrupt" ||
+      context.runtime?.execution_profile === "managed",
+  );
+}
+
+function shortPolicyHash(value: string | null | undefined) {
+  if (!value) return "snapshot unavailable";
+  return value.length > 12 ? `${value.slice(0, 12)}…` : value;
 }

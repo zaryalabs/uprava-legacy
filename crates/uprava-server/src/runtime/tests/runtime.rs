@@ -1,6 +1,293 @@
 use super::*;
 
 #[tokio::test]
+async fn runtime_stopped_closes_managed_attempt_before_resume_attempt_starts() {
+    let state = test_state().await;
+    let (node_id, detail, workspace_path) = create_test_session(&state).await;
+    let mut started = node_event_fixture(
+        &detail,
+        node_id.clone(),
+        "attempt-before-stop",
+        1,
+        EventKind::RuntimeAttemptStarted,
+        json!({
+            "runtime_attempt_id": "attempt-before-stop",
+            "state": "ready",
+            "reason": "session_start",
+        }),
+    );
+    started.turn_id = None;
+    accept_node_event(&state, started)
+        .await
+        .expect("first attempt starts");
+    let mut stopped = node_event_fixture(
+        &detail,
+        node_id.clone(),
+        "runtime-stop",
+        2,
+        EventKind::RuntimeStopped,
+        json!({"provider": "codex", "mode": "managed", "reason": "explicit_stop"}),
+    );
+    stopped.turn_id = None;
+    accept_node_event(&state, stopped)
+        .await
+        .expect("runtime stop projects");
+    let mut resumed = node_event_fixture(
+        &detail,
+        node_id,
+        "attempt-after-stop",
+        3,
+        EventKind::RuntimeAttemptStarted,
+        json!({
+            "runtime_attempt_id": "attempt-after-stop",
+            "state": "starting",
+            "reason": "explicit_resume",
+        }),
+    );
+    resumed.turn_id = None;
+    accept_node_event(&state, resumed)
+        .await
+        .expect("resume attempt supersedes stopped attempt");
+
+    let stopped_attempt: (String, Option<String>) = sqlx::query_as(
+        "select state, stop_reason from runtime_attempts where runtime_attempt_id = 'attempt-before-stop'",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .expect("stopped attempt loads");
+    let current_attempt: String = sqlx::query_scalar(
+        "select current_attempt_id from runtime_sessions where runtime_session_id = ?1",
+    )
+    .bind(detail.session.runtime.runtime_session_id.as_str())
+    .fetch_one(&state.pool)
+    .await
+    .expect("current attempt loads");
+
+    assert_eq!(
+        stopped_attempt,
+        ("stopped".to_owned(), Some("explicit_stop".to_owned()))
+    );
+    assert_eq!(current_attempt, "attempt-after-stop");
+    let _ = std::fs::remove_dir_all(workspace_path);
+}
+
+#[tokio::test]
+async fn managed_attempt_and_interaction_events_round_trip_through_persistence() {
+    let state = test_state().await;
+    let (node_id, detail, workspace_path) = create_test_session(&state).await;
+    let attempt_id = "attempt-foundation-1";
+    let mut started = node_event_fixture(
+        &detail,
+        node_id.clone(),
+        "attempt-foundation-started",
+        1,
+        EventKind::RuntimeAttemptStarted,
+        json!({
+            "runtime_attempt_id": attempt_id,
+            "state": "starting",
+            "reason": "session_start",
+        }),
+    );
+    started.turn_id = None;
+    accept_node_event(&state, started)
+        .await
+        .expect("attempt event accepts");
+    let mut requested = node_event_fixture(
+        &detail,
+        node_id.clone(),
+        "interaction-foundation-requested",
+        2,
+        EventKind::ProviderInteractionRequested,
+        json!({
+            "provider_interaction_id": "interaction-foundation-1",
+            "runtime_attempt_id": attempt_id,
+            "interaction_kind": "user_input",
+            "prompt": "Choose a target",
+            "expires_at": null,
+        }),
+    );
+    requested.turn_id = None;
+    accept_node_event(&state, requested)
+        .await
+        .expect("interaction event accepts");
+    let projected = load_session_detail(&state, &detail.session.session_thread_id)
+        .await
+        .expect("session projection loads");
+
+    assert_eq!(
+        (
+            projected
+                .session
+                .runtime
+                .current_attempt
+                .as_ref()
+                .map(|attempt| attempt.runtime_attempt_id.as_str()),
+            projected.pending_interactions.first().map(|interaction| (
+                interaction.provider_interaction_id.as_str(),
+                interaction.kind,
+                interaction.prompt.as_str(),
+            )),
+        ),
+        (
+            Some(attempt_id),
+            Some((
+                "interaction-foundation-1",
+                ProviderInteractionKind::UserInput,
+                "Choose a target",
+            )),
+        )
+    );
+
+    let _ = submit_provider_input_route(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path((
+            detail.session.session_thread_id.to_string(),
+            "interaction-foundation-1".to_owned(),
+        )),
+        Json(SubmitProviderInputRequest {
+            answers: vec!["workspace".to_owned()],
+        }),
+    )
+    .await
+    .expect("Core accepts a typed resolution intent");
+    let resolving_state: String = sqlx::query_scalar(
+        "select state from provider_interactions where provider_interaction_id = 'interaction-foundation-1'",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .expect("resolving interaction loads");
+    assert_eq!(resolving_state, "resolving");
+    let duplicate = submit_provider_input_route(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path((
+            detail.session.session_thread_id.to_string(),
+            "interaction-foundation-1".to_owned(),
+        )),
+        Json(SubmitProviderInputRequest {
+            answers: vec!["duplicate".to_owned()],
+        }),
+    )
+    .await;
+    assert!(matches!(
+        duplicate,
+        Err(AppError::Conflict {
+            code: "provider_interaction.already_resolving",
+            ..
+        })
+    ));
+    let resolution_command_count: i64 = sqlx::query_scalar(
+        "select count(*) from commands where kind = 'SubmitUserInput' and runtime_session_id = ?1",
+    )
+    .bind(detail.session.runtime.runtime_session_id.as_str())
+    .fetch_one(&state.pool)
+    .await
+    .expect("resolution command count loads");
+    assert_eq!(resolution_command_count, 1);
+
+    let mut resolved = node_event_fixture(
+        &detail,
+        node_id,
+        "interaction-foundation-resolved",
+        3,
+        EventKind::ProviderInteractionResolved,
+        json!({
+            "provider_interaction_id": "interaction-foundation-1",
+            "runtime_attempt_id": attempt_id,
+            "interaction_kind": "user_input",
+            "approved": null,
+            "answers": ["workspace"],
+        }),
+    );
+    resolved.turn_id = None;
+    accept_node_event(&state, resolved)
+        .await
+        .expect("resolved interaction event accepts");
+    let terminal_state: String = sqlx::query_scalar(
+        "select state from provider_interactions where provider_interaction_id = 'interaction-foundation-1'",
+    )
+            .fetch_one(&state.pool)
+            .await
+            .expect("terminal interaction loads");
+    std::fs::remove_dir_all(&workspace_path).expect("workspace dir removes");
+
+    assert_eq!(terminal_state, "answered");
+}
+
+#[tokio::test]
+async fn expired_provider_interaction_rejects_late_input_without_command() {
+    let state = test_state().await;
+    let (node_id, detail, workspace_path) = create_test_session(&state).await;
+    let attempt_id = "attempt-expired-interaction";
+    let mut started = node_event_fixture(
+        &detail,
+        node_id.clone(),
+        "expired-interaction-attempt",
+        1,
+        EventKind::RuntimeAttemptStarted,
+        json!({
+            "runtime_attempt_id": attempt_id,
+            "state": "ready",
+            "reason": "session_start",
+        }),
+    );
+    started.turn_id = None;
+    accept_node_event(&state, started)
+        .await
+        .expect("attempt event accepts");
+    let mut requested = node_event_fixture(
+        &detail,
+        node_id,
+        "expired-interaction-requested",
+        2,
+        EventKind::ProviderInteractionRequested,
+        json!({
+            "provider_interaction_id": "interaction-expired",
+            "runtime_attempt_id": attempt_id,
+            "interaction_kind": "user_input",
+            "prompt": "This request is already stale",
+            "expires_at": Utc::now() - chrono::Duration::seconds(1),
+        }),
+    );
+    requested.turn_id = None;
+    accept_node_event(&state, requested)
+        .await
+        .expect("interaction event accepts");
+    let before = command_count(&state).await;
+
+    let result = submit_provider_input_route(
+        State(state.clone()),
+        HeaderMap::new(),
+        Path((
+            detail.session.session_thread_id.to_string(),
+            "interaction-expired".to_owned(),
+        )),
+        Json(SubmitProviderInputRequest {
+            answers: vec!["too late".to_owned()],
+        }),
+    )
+    .await;
+    let state_value: String = sqlx::query_scalar(
+        "select state from provider_interactions where provider_interaction_id = 'interaction-expired'",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .expect("expired interaction reloads");
+
+    assert!(matches!(
+        result,
+        Err(AppError::Conflict {
+            code: "provider_interaction.expired",
+            ..
+        })
+    ));
+    assert_eq!(state_value, "expired");
+    assert_eq!(command_count(&state).await, before);
+    std::fs::remove_dir_all(&workspace_path).expect("workspace dir removes");
+}
+
+#[tokio::test]
 async fn turn_events_update_durable_turn_state_and_blocked_approval() {
     let state = test_state().await;
     let (node_id, detail, workspace_path) = create_test_session(&state).await;
@@ -10,6 +297,7 @@ async fn turn_events_update_durable_turn_state_and_blocked_approval() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "needs approval".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await
@@ -69,6 +357,7 @@ async fn send_turn_rejects_offline_node_without_recording_command() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "hello".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -105,6 +394,7 @@ async fn send_turn_rejects_detached_session_without_recording_command() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "hello".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -136,6 +426,7 @@ async fn send_turn_rejects_runtime_state_without_recording_command() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "hello".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -280,6 +571,7 @@ async fn send_turn_rejects_placement_hard_block_without_recording_command() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "blocked".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -312,6 +604,7 @@ async fn send_turn_rejects_missing_provider_capability_without_recording_command
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "hello".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -322,7 +615,7 @@ async fn send_turn_rejects_missing_provider_capability_without_recording_command
     assert!(matches!(
         result,
         Err(AppError::BadRequest {
-            code: "node.capability_missing",
+            code: "runtime.profile_capability_unavailable",
             ..
         })
     ));
@@ -795,6 +1088,15 @@ async fn load_session_detail_expires_idle_runtime_with_durable_event() {
     let (_node_id, detail, workspace_path) = create_test_session(&state).await;
     set_session_runtime_state(&state, &detail, RuntimeSessionState::Ready).await;
     set_session_runtime_last_step(&state, &detail, Utc::now() - chrono::Duration::seconds(2)).await;
+    let (managed_token, _) = issue_managed_mcp_access_lease(
+        &state,
+        &detail.session.session_thread_id,
+        ActorRef::Provider {
+            provider: "codex".to_owned(),
+        },
+    )
+    .await
+    .expect("Managed lease issues before expiry");
 
     let detail = load_session_detail(&state, &detail.session.session_thread_id)
         .await
@@ -812,6 +1114,29 @@ async fn load_session_detail_expires_idle_runtime_with_durable_event() {
                 .and_then(serde_json::Value::as_str)
                 == Some("runtime.idle_expired")
     }));
+    let stop_command: String = sqlx::query_scalar(
+        "select command_json from commands where runtime_session_id = ?1 and kind = 'StopRuntime'",
+    )
+    .bind(detail.session.runtime.runtime_session_id.as_str())
+    .fetch_one(&state.pool)
+    .await
+    .expect("idle expiry records a Node stop command");
+    let stop_command: CommandEnvelope =
+        serde_json::from_str(&stop_command).expect("stop command decodes");
+    assert!(matches!(
+        stop_command.payload,
+        CommandPayload::StopRuntime {
+            reason: Some(ref reason),
+            ..
+        } if reason == "idle_expired"
+    ));
+    let revoked = validate_mcp_access_lease(&state, &managed_token)
+        .await
+        .expect_err("idle expiry revokes the Managed provider lease");
+    assert_eq!(
+        revoked.code,
+        uprava_protocol::ToolExecutionErrorCode::LeaseRevoked
+    );
 }
 
 #[tokio::test]
@@ -828,6 +1153,7 @@ async fn send_turn_rejects_idle_expired_runtime_without_recording_command() {
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "after expiry".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await;
@@ -842,12 +1168,12 @@ async fn send_turn_rejects_idle_expired_runtime_without_recording_command() {
             ..
         })
     ));
-    assert_eq!(command_count_after, command_count_before);
+    assert_eq!(command_count_after, command_count_before + 1);
     assert_eq!(message_count_after, message_count_before);
 }
 
 #[tokio::test]
-async fn resume_runtime_accepts_idle_expired_runtime() {
+async fn resume_runtime_waits_for_idle_expiry_stop_to_finish() {
     let state = test_state_with_runtime_expiry(1).await;
     let (_node_id, detail, workspace_path) = create_test_session(&state).await;
     set_session_runtime_state(&state, &detail, RuntimeSessionState::Ready).await;
@@ -867,12 +1193,32 @@ async fn resume_runtime_accepts_idle_expired_runtime() {
     .await
     .expect("provider resume ref stores");
 
+    let pending = resume_runtime(
+        State(state.clone()),
+        Path(detail.session.runtime.runtime_session_id.to_string()),
+    )
+    .await;
+    assert!(matches!(
+        pending,
+        Err(AppError::Conflict {
+            code: "runtime.stop_pending",
+            ..
+        })
+    ));
+    sqlx::query(
+        "update commands set state = 'completed', completed_at = ?1 where runtime_session_id = ?2 and kind = 'StopRuntime'",
+    )
+    .bind(Utc::now())
+    .bind(detail.session.runtime.runtime_session_id.as_str())
+    .execute(&state.pool)
+    .await
+    .expect("idle stop confirmation stores");
     let response = resume_runtime(
         State(state.clone()),
         Path(detail.session.runtime.runtime_session_id.to_string()),
     )
     .await
-    .expect("expired runtime resumes")
+    .expect("expired runtime resumes after stop confirmation")
     .0;
     let command_kind: String =
         sqlx::query_scalar("select kind from commands where command_id = ?1")

@@ -41,6 +41,7 @@ pub(crate) struct CommandExecutionContext<'a> {
     pub(crate) provider_mcp_access: Option<&'a ProviderMcpAccess>,
     pub(crate) live_sender: Option<&'a ControlFrameSender>,
     pub(crate) terminal_supervisor: Option<&'a TerminalSupervisor>,
+    pub(crate) managed_supervisor: Option<&'a ManagedRuntimeSupervisor>,
     pub(crate) cancellation: Option<watch::Receiver<bool>>,
     pub(crate) state_store: Option<&'a NodeStateStore>,
 }
@@ -70,6 +71,7 @@ pub(crate) async fn prepare_command_dispatch_with_live_socket(
         provider_mcp_access,
         live_sender,
         terminal_supervisor,
+        managed_supervisor,
         cancellation,
         state_store,
     } = execution;
@@ -299,21 +301,28 @@ pub(crate) async fn prepare_command_dispatch_with_live_socket(
             } else {
                 let provider_key = provider_for_command(local_state, command);
                 let workspace_path = workspace_path_for_command(local_state, command);
+                let execution_profile = execution_profile_for_command(local_state, command);
                 let mut live_event_sink = live_sender
                     .map(|sender| NodeLiveEventSink::new(&mut local_state.runtime_states, sender));
                 let events = if let Some(provider_key) = provider_key {
-                    RuntimeManager::for_provider(&provider_key, config)
-                        .execute_command(
-                            command,
-                            &mut local_state.runtime_seqs,
-                            workspace_path.as_deref(),
-                            &mut local_state.runtime_transcripts,
-                            &mut local_state.runtime_provider_resume_refs,
-                            provider_mcp_access,
-                            live_event_sink.as_mut(),
-                            cancellation,
-                        )
-                        .await
+                    AgentRuntimeDriver::for_command(
+                        &provider_key,
+                        execution_profile,
+                        config,
+                        managed_supervisor,
+                    )
+                    .execute_command(
+                        command,
+                        &mut local_state.runtime_seqs,
+                        workspace_path.as_deref(),
+                        &mut local_state.runtime_transcripts,
+                        &mut local_state.runtime_provider_resume_refs,
+                        provider_mcp_access,
+                        live_event_sink.as_mut(),
+                        cancellation,
+                        &mut local_state.managed_attempts,
+                    )
+                    .await
                 } else {
                     missing_provider_events_for_command(command, &mut local_state.runtime_seqs)
                 };
@@ -807,6 +816,20 @@ pub(crate) fn remember_runtime_metadata(
         command.kind,
         CommandKind::StartRuntime | CommandKind::ResumeRuntime
     ) {
+        let execution_profile = match &command.payload {
+            CommandPayload::StartRuntime {
+                execution_profile, ..
+            }
+            | CommandPayload::ResumeRuntime {
+                execution_profile, ..
+            } => *execution_profile,
+            _ => AgentExecutionProfile::ExecCompatibility,
+        };
+        changed |= insert_if_changed(
+            &mut local_state.runtime_execution_profiles,
+            runtime_key.clone(),
+            execution_profile,
+        );
         if let Some(workspace_path) = canonical_workspace_path {
             changed |= insert_if_changed(
                 &mut local_state.runtime_workspace_paths,
@@ -817,6 +840,30 @@ pub(crate) fn remember_runtime_metadata(
     }
 
     Ok(changed)
+}
+
+pub(crate) fn execution_profile_for_command(
+    local_state: &NodeLocalState,
+    command: &CommandEnvelope,
+) -> AgentExecutionProfile {
+    match &command.payload {
+        CommandPayload::StartRuntime {
+            execution_profile, ..
+        }
+        | CommandPayload::ResumeRuntime {
+            execution_profile, ..
+        } => *execution_profile,
+        _ => command
+            .target
+            .runtime_session_id()
+            .and_then(|runtime_id| {
+                local_state
+                    .runtime_execution_profiles
+                    .get(runtime_id.as_str())
+                    .copied()
+            })
+            .unwrap_or(AgentExecutionProfile::ExecCompatibility),
+    }
 }
 
 pub(crate) fn provider_for_command(

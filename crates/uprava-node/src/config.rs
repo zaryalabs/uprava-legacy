@@ -1,4 +1,9 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    io::Read,
+    path::PathBuf,
+    process::Stdio,
+    time::{Duration, Instant},
+};
 
 use anyhow::Context;
 use reqwest::Url;
@@ -14,6 +19,8 @@ pub(crate) struct NodeConfig {
     pub(crate) state_path: PathBuf,
     pub(crate) workspace_paths: Vec<PathBuf>,
     pub(crate) codex_binary: String,
+    pub(crate) codex_version: Option<String>,
+    pub(crate) codex_managed_unavailable_reason: Option<String>,
     pub(crate) codex_ignore_user_config: bool,
     pub(crate) codex_timeout: Duration,
     pub(crate) opensandbox_url: Option<Url>,
@@ -38,6 +45,7 @@ impl NodeConfig {
         let workspace_paths = parse_workspace_paths()?;
         let codex_binary =
             std::env::var("UPRAVA_CODEX_BINARY").unwrap_or_else(|_| "codex".to_owned());
+        let (codex_version, codex_managed_unavailable_reason) = probe_managed_codex(&codex_binary);
         let codex_ignore_user_config = parse_env_bool("UPRAVA_CODEX_IGNORE_USER_CONFIG", true)?;
         let codex_timeout =
             parse_env_duration_seconds("UPRAVA_CODEX_TIMEOUT_SECONDS", 24 * 60 * 60)?;
@@ -54,7 +62,7 @@ impl NodeConfig {
             validate_insecure_opensandbox_url(url)?;
         }
         let task_runtime_image = std::env::var("UPRAVA_TASK_RUNTIME_IMAGE")
-            .unwrap_or_else(|_| "uprava/codex-runtime:0.2.19".to_owned());
+            .unwrap_or_else(|_| "uprava/codex-runtime:0.2.26".to_owned());
         if task_runtime_image.trim().is_empty() {
             anyhow::bail!("UPRAVA_TASK_RUNTIME_IMAGE must not be empty");
         }
@@ -72,6 +80,8 @@ impl NodeConfig {
             state_path,
             workspace_paths,
             codex_binary,
+            codex_version,
+            codex_managed_unavailable_reason,
             codex_ignore_user_config,
             codex_timeout,
             opensandbox_url,
@@ -80,6 +90,74 @@ impl NodeConfig {
             toolhive_timeout,
         })
     }
+}
+
+fn probe_managed_codex(binary: &str) -> (Option<String>, Option<String>) {
+    if !super::command_available(binary) {
+        return (None, Some("binary_not_found".to_owned()));
+    }
+    let version = match bounded_codex_version_probe(binary) {
+        Ok(version) => version,
+        Err(reason) => return (None, Some(reason.to_owned())),
+    };
+    let Some(parts) = version.split_whitespace().find_map(parse_numeric_version) else {
+        return (Some(version), Some("version_unrecognized".to_owned()));
+    };
+    let supported = parts.0 > 0 || parts >= (0, 144, 1);
+    (
+        Some(version),
+        (!supported).then(|| "version_unsupported".to_owned()),
+    )
+}
+
+fn bounded_codex_version_probe(binary: &str) -> Result<String, &'static str> {
+    let mut child = std::process::Command::new(binary)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| "version_probe_failed")?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("version_probe_timeout");
+            }
+            Err(_) => return Err("version_probe_failed"),
+        }
+    };
+    if !status.success() {
+        return Err("version_probe_failed");
+    }
+    let mut bytes = Vec::new();
+    child
+        .stdout
+        .take()
+        .ok_or("version_probe_failed")?
+        .take(4096)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "version_probe_failed")?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_owned())
+}
+
+pub(crate) fn parse_numeric_version(value: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = value.trim_start_matches('v').split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts
+        .next()?
+        .split(|character: char| !character.is_ascii_digit())
+        .next()?
+        .parse()
+        .ok()?;
+    Some((major, minor, patch))
 }
 
 fn validate_insecure_opensandbox_url(url: &Url) -> anyhow::Result<()> {

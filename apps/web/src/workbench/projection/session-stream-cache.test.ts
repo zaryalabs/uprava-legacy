@@ -93,6 +93,33 @@ describe("applySessionStreamEventToCache", () => {
     ).toBe("Reading files");
   });
 
+  it("adds a pending provider question immediately and refreshes actions", async () => {
+    const queryClient = queryClientWithSnapshots(detailWithSeq(1));
+
+    const result = await applySessionStreamEventToCache(
+      queryClient,
+      "session-1",
+      eventWithSeq(2, "provider.interaction.requested", {
+        provider_interaction_id: "interaction-1",
+        runtime_attempt_id: "attempt-1",
+        interaction_kind: "user_input",
+        prompt: "Which target?",
+        expires_at: null,
+      }),
+    );
+
+    expect(result).toEqual({ kind: "applied" });
+    expect(
+      queryClient.getQueryData<SessionDetail>(queryKeys.session("session-1"))
+        ?.pending_interactions,
+    ).toEqual([
+      expect.objectContaining({ provider_interaction_id: "interaction-1" }),
+    ]);
+    expect(
+      isInvalidated(queryClient, queryKeys.agentProjection("session-1")),
+    ).toBe(true);
+  });
+
   it("keeps one hundred live activity events on the push path", async () => {
     const queryClient = queryClientWithSnapshots(detailWithSeq(1));
 

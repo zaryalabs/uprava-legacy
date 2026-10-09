@@ -27,10 +27,13 @@ import type {
   NodeEnrollmentSummary,
   NodeRevocationResponse,
   PlacementDeletionResponse,
+  PreviewSessionPolicyRequest,
   ResolveApprovalRequest,
   SendTurnRequest,
   CreateScheduledMessageRequest,
   ScheduledSessionMessage,
+  SessionPolicyPreview,
+  SubmitProviderInputRequest,
   JobDetail,
   JobRunSummary,
   JobSummary,
@@ -720,6 +723,8 @@ export const coreApi = {
     ),
   createSession: (request: CreateSessionRequest) =>
     apiPost<import("../protocol/types").SessionDetail>("/sessions", request),
+  previewSessionPolicy: (request: PreviewSessionPolicyRequest) =>
+    apiPost<SessionPolicyPreview>("/sessions/policy-preview", request),
   session: (sessionThreadId: string) =>
     apiGet<import("../protocol/types").SessionDetail>(
       `/sessions/${encodeURIComponent(sessionThreadId)}`,
@@ -838,6 +843,32 @@ export const coreApi = {
       `/sessions/${encodeURIComponent(
         sessionThreadId,
       )}/approvals/${encodeURIComponent(approvalId)}/resolve`,
+      request,
+      commandAcceptedResponseSchema,
+    ),
+  resolveProviderApproval: (
+    sessionThreadId: string,
+    providerInteractionId: string,
+    request: ResolveApprovalRequest,
+  ) =>
+    apiPost<CommandAcceptedResponse>(
+      `/sessions/${encodeURIComponent(
+        sessionThreadId,
+      )}/provider-interactions/${encodeURIComponent(
+        providerInteractionId,
+      )}/approval`,
+      request,
+      commandAcceptedResponseSchema,
+    ),
+  submitProviderInput: (
+    sessionThreadId: string,
+    providerInteractionId: string,
+    request: SubmitProviderInputRequest,
+  ) =>
+    apiPost<CommandAcceptedResponse>(
+      `/sessions/${encodeURIComponent(
+        sessionThreadId,
+      )}/provider-interactions/${encodeURIComponent(providerInteractionId)}/input`,
       request,
       commandAcceptedResponseSchema,
     ),

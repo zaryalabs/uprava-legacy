@@ -583,6 +583,7 @@ async fn node_provider_access_issues_ephemeral_codex_lease_without_persisting_to
         Path(detail.session.session_thread_id.to_string()),
         Json(SendTurnRequest {
             content: "inspect available tools".to_owned(),
+            collaboration_mode: None,
         }),
     )
     .await
@@ -634,6 +635,211 @@ async fn node_provider_access_issues_ephemeral_codex_lease_without_persisting_to
     assert_eq!(claims.session_thread_id, detail.session.session_thread_id);
     assert!(!command_json.contains(&token));
     assert!(!audit_metadata.contains(&token));
+    let _ = std::fs::remove_dir_all(workspace_path);
+}
+
+#[tokio::test]
+async fn node_provider_access_issues_lease_for_managed_runtime_start_and_resume() {
+    let state = test_state().await;
+    let (node_id, detail, workspace_path) = create_test_session(&state).await;
+    let capabilities = std::iter::once(CapabilitySummary {
+        key: "provider.codex".to_owned(),
+        value: CapabilityValue::provider(true),
+    })
+    .chain(
+        ProviderRuntimeCapability::required_for_managed_codex()
+            .iter()
+            .map(|capability| CapabilitySummary {
+                key: capability.as_str().to_owned(),
+                value: CapabilityValue::Provider {
+                    available: true,
+                    configured: true,
+                    mode: "managed".to_owned(),
+                    timeout_seconds: None,
+                    unavailable_reason: None,
+                },
+            }),
+    )
+    .collect();
+    set_node_capabilities(&state, &node_id, capabilities).await;
+    let managed = create_session(
+        State(state.clone()),
+        Json(CreateSessionRequest {
+            project_placement_id: detail.placement.project_placement_id,
+            title: Some("Managed provider access".to_owned()),
+            provider: "codex".to_owned(),
+            execution_profile: Some(AgentExecutionProfile::Managed),
+            force: false,
+        }),
+    )
+    .await
+    .expect("managed session creates")
+    .0;
+    let command_id: String = sqlx::query_scalar(
+        "select command_id from commands where runtime_session_id = ?1 and kind = 'StartRuntime'",
+    )
+    .bind(managed.session.runtime.runtime_session_id.as_str())
+    .fetch_one(&state.pool)
+    .await
+    .expect("managed start command loads");
+    let rotated = rotate_node_credential(State(state.clone()), Path(node_id.to_string()))
+        .await
+        .expect("node credential rotates")
+        .0;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-uprava-node-id",
+        HeaderValue::from_str(node_id.as_str()).expect("node header builds"),
+    );
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", rotated.credential))
+            .expect("authorization header builds"),
+    );
+
+    let access = node_provider_mcp_access(
+        State(state.clone()),
+        headers.clone(),
+        Json(ProviderMcpAccessRequest {
+            command_id: CommandId::from(command_id),
+        }),
+    )
+    .await
+    .expect("managed runtime provider access issues")
+    .0;
+    let claims = validate_mcp_access_lease(&state, access.access_token.expose_secret())
+        .await
+        .expect("managed runtime lease validates");
+
+    assert_eq!(access.endpoint_url, "/mcp");
+    assert_eq!(claims.session_thread_id, managed.session.session_thread_id);
+
+    sqlx::query("update runtime_sessions set state = ?1 where runtime_session_id = ?2")
+        .bind(format_runtime_state(RuntimeSessionState::Stopped))
+        .bind(managed.session.runtime.runtime_session_id.as_str())
+        .execute(&state.pool)
+        .await
+        .expect("managed runtime stops");
+    sqlx::query("update session_threads set state = ?1 where session_thread_id = ?2")
+        .bind(format_session_state(SessionThreadState::Stopped))
+        .bind(managed.session.session_thread_id.as_str())
+        .execute(&state.pool)
+        .await
+        .expect("managed session stops");
+    let resume = resume_runtime(
+        State(state.clone()),
+        Path(managed.session.runtime.runtime_session_id.to_string()),
+    )
+    .await
+    .expect("managed runtime resume command records")
+    .0;
+    let resume_access = node_provider_mcp_access(
+        State(state.clone()),
+        headers,
+        Json(ProviderMcpAccessRequest {
+            command_id: resume.command_id,
+        }),
+    )
+    .await
+    .expect("stopped managed runtime receives scoped resume access")
+    .0;
+    let resume_claims =
+        validate_mcp_access_lease(&state, resume_access.access_token.expose_secret())
+            .await
+            .expect("managed resume lease validates");
+    assert_eq!(
+        resume_claims.session_thread_id,
+        managed.session.session_thread_id
+    );
+    sqlx::query("update commands set state = 'failed' where command_id = ?1")
+        .bind(
+            resume_claims
+                .resume_command_id
+                .as_ref()
+                .expect("resume command id")
+                .as_str(),
+        )
+        .execute(&state.pool)
+        .await
+        .expect("resume command fails");
+    let rejected = validate_mcp_access_lease(&state, resume_access.access_token.expose_secret())
+        .await
+        .expect_err("failed resume closes stopped-session lease scope");
+    assert_eq!(rejected.code, ToolExecutionErrorCode::ScopeMismatch);
+    let _ = std::fs::remove_dir_all(workspace_path);
+}
+
+#[tokio::test]
+async fn concurrent_mcp_lease_rotation_serializes_on_sqlite() {
+    let database_path = std::env::temp_dir().join(format!(
+        "uprava-mcp-lease-concurrency-{}.sqlite",
+        Uuid::new_v4()
+    ));
+    remove_sqlite_file_set(&database_path);
+    let state = Arc::new(
+        AppState::new(
+            test_config(86_400),
+            sqlite_file_pool_with_connections(&database_path, 4).await,
+        )
+        .await
+        .expect("state migrates"),
+    );
+    let (_node_id, detail, workspace_path) = create_test_session(&state).await;
+    let first_actor = ActorRef::Provider {
+        provider: "codex".to_owned(),
+    };
+    let second_actor = first_actor.clone();
+
+    let (first, second) = tokio::join!(
+        issue_mcp_access_lease(&state, &detail.session.session_thread_id, first_actor),
+        issue_mcp_access_lease(&state, &detail.session.session_thread_id, second_actor)
+    );
+
+    first.expect("first concurrent lease issues");
+    second.expect("second concurrent lease issues");
+    let active_leases: i64 = sqlx::query_scalar(
+        "select count(*) from mcp_access_leases where session_thread_id = ?1 and revoked_at is null",
+    )
+    .bind(detail.session.session_thread_id.as_str())
+    .fetch_one(&state.pool)
+    .await
+    .expect("active leases count loads");
+    assert_eq!(active_leases, 1);
+
+    let _ = std::fs::remove_dir_all(workspace_path);
+    drop(state);
+    remove_sqlite_file_set(&database_path);
+}
+
+#[tokio::test]
+async fn managed_mcp_lease_is_reused_until_the_refresh_window() {
+    let state = test_state().await;
+    let (_node_id, detail, workspace_path) = create_test_session(&state).await;
+    let actor = ActorRef::Provider {
+        provider: "codex".to_owned(),
+    };
+
+    let (first_token, first_claims) =
+        issue_managed_mcp_access_lease(&state, &detail.session.session_thread_id, actor.clone())
+            .await
+            .expect("first Managed lease issues");
+    let (second_token, second_claims) =
+        issue_managed_mcp_access_lease(&state, &detail.session.session_thread_id, actor)
+            .await
+            .expect("active Managed lease reuses");
+
+    assert_eq!(second_token, first_token);
+    assert_eq!(second_claims.lease_id, first_claims.lease_id);
+    assert!(first_claims.expires_at - first_claims.issued_at >= chrono::Duration::hours(24));
+    let active_leases: i64 = sqlx::query_scalar(
+        "select count(*) from mcp_access_leases where session_thread_id = ?1 and revoked_at is null",
+    )
+    .bind(detail.session.session_thread_id.as_str())
+    .fetch_one(&state.pool)
+    .await
+    .expect("active Managed leases count loads");
+    assert_eq!(active_leases, 1);
+
     let _ = std::fs::remove_dir_all(workspace_path);
 }
 

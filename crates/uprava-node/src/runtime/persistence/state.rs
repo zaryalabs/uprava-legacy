@@ -27,6 +27,10 @@ pub(crate) struct NodeLocalState {
     #[serde(default)]
     pub(crate) runtime_workspace_paths: HashMap<String, String>,
     #[serde(default)]
+    pub(crate) runtime_execution_profiles: HashMap<String, AgentExecutionProfile>,
+    #[serde(default)]
+    pub(crate) managed_attempts: HashMap<String, ManagedAttemptDescriptor>,
+    #[serde(default)]
     pub(crate) runtime_states: HashMap<String, RuntimeSessionState>,
     #[serde(default)]
     pub(crate) runtime_transcripts: HashMap<String, Vec<ProviderTranscriptMessage>>,
@@ -87,6 +91,8 @@ impl Default for NodeLocalState {
             event_outbox: Vec::new(),
             runtime_providers: HashMap::new(),
             runtime_workspace_paths: HashMap::new(),
+            runtime_execution_profiles: HashMap::new(),
+            managed_attempts: HashMap::new(),
             runtime_states: HashMap::new(),
             runtime_transcripts: HashMap::new(),
             runtime_provider_resume_refs: HashMap::new(),
@@ -133,6 +139,11 @@ impl std::fmt::Debug for NodeLocalState {
             .field("event_outbox", &self.event_outbox)
             .field("runtime_providers", &self.runtime_providers)
             .field("runtime_workspace_paths", &self.runtime_workspace_paths)
+            .field(
+                "runtime_execution_profiles",
+                &self.runtime_execution_profiles,
+            )
+            .field("managed_attempts", &self.managed_attempts)
             .field("runtime_states", &self.runtime_states)
             .field("runtime_transcript_counts", &runtime_transcript_counts)
             .field(
@@ -477,6 +488,8 @@ impl NodeLocalState {
             cancelled_deductions: self.cancelled_deductions.clone(),
             tool_dependencies: self.tool_dependencies.clone(),
             task_runtime_mappings: self.task_runtime_mappings.clone(),
+            runtime_execution_profiles: self.runtime_execution_profiles.clone(),
+            managed_attempts: self.managed_attempts.clone(),
             ..Self::default()
         }
     }
@@ -564,6 +577,16 @@ impl NodeLocalState {
             &mut self.runtime_workspace_paths,
             &baseline.runtime_workspace_paths,
             &command_state.runtime_workspace_paths,
+        );
+        merge_changed_map(
+            &mut self.runtime_execution_profiles,
+            &baseline.runtime_execution_profiles,
+            &command_state.runtime_execution_profiles,
+        );
+        merge_changed_map(
+            &mut self.managed_attempts,
+            &baseline.managed_attempts,
+            &command_state.managed_attempts,
         );
         merge_changed_map(
             &mut self.runtime_states,

@@ -21,6 +21,12 @@ pub enum UpravaRef {
     Runtime {
         runtime_session_id: RuntimeSessionId,
     },
+    RuntimeAttempt {
+        runtime_attempt_id: RuntimeAttemptId,
+    },
+    ProviderInteraction {
+        provider_interaction_id: ProviderInteractionId,
+    },
     TaskRun {
         task_run_id: TaskRunId,
     },
@@ -349,6 +355,8 @@ pub struct AgentProjection {
     pub current_turn: Option<TurnId>,
     #[serde(default)]
     pub pending_approvals: Vec<ApprovalId>,
+    #[serde(default)]
+    pub pending_interactions: Vec<ProviderInteractionSummary>,
     #[serde(default)]
     pub active_warnings: Vec<ResourceBadge>,
     #[serde(default)]

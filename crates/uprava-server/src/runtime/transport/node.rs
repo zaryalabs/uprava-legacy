@@ -464,10 +464,20 @@ pub(crate) async fn node_provider_mcp_access(
         ));
     }
     let command: CommandEnvelope = serde_json::from_str(&command_json)?;
-    if command.kind != CommandKind::SendTurn {
+    let managed_process_start = matches!(
+        &command.payload,
+        CommandPayload::StartRuntime {
+            execution_profile: AgentExecutionProfile::Managed,
+            ..
+        } | CommandPayload::ResumeRuntime {
+            execution_profile: AgentExecutionProfile::Managed,
+            ..
+        }
+    );
+    if command.kind != CommandKind::SendTurn && !managed_process_start {
         return Err(AppError::bad_request(
             "provider.command_not_eligible",
-            "Only a session turn can receive provider MCP access",
+            "Only a session turn or Managed runtime start can receive provider MCP access",
         ));
     }
     let session_thread_id = command.target.session_thread_id().cloned().ok_or_else(|| {
@@ -476,9 +486,9 @@ pub(crate) async fn node_provider_mcp_access(
             "Provider command is missing a session target",
         )
     })?;
-    let provider: String = sqlx::query_scalar(
+    let (provider, execution_profile): (String, String) = sqlx::query_as(
         r#"
-        select rs.provider
+        select rs.provider, rs.execution_profile
         from runtime_sessions rs
         where rs.session_thread_id = ?1
         order by rs.updated_at desc
@@ -496,8 +506,21 @@ pub(crate) async fn node_provider_mcp_access(
         ));
     }
 
-    let (access_token, claims) =
-        issue_mcp_access_lease(&state, &session_thread_id, ActorRef::Provider { provider }).await?;
+    let managed_runtime = managed_process_start || execution_profile == "managed";
+    let actor_ref = ActorRef::Provider { provider };
+    let (access_token, claims) = if command.kind == CommandKind::ResumeRuntime {
+        issue_mcp_access_lease_for_resume(
+            &state,
+            &session_thread_id,
+            actor_ref,
+            &request.command_id,
+        )
+        .await?
+    } else if managed_runtime {
+        issue_managed_mcp_access_lease(&state, &session_thread_id, actor_ref).await?
+    } else {
+        issue_mcp_access_lease(&state, &session_thread_id, actor_ref).await?
+    };
     audit_security_event(
         &state,
         "provider.mcp_access.issued",
@@ -644,6 +667,8 @@ pub(crate) async fn handle_node_control_frame(
         ControlFrame::Hello {
             protocol_version,
             node_id: hello_node_id,
+            active_runtime_ids,
+            actual_runtime_attempts,
             ..
         } => {
             if hello_node_id != *node_id {
@@ -680,6 +705,13 @@ pub(crate) async fn handle_node_control_frame(
                     "A newer control connection is already active",
                 ));
             }
+            reconcile_node_runtime_actual_state(
+                state,
+                node_id,
+                &active_runtime_ids,
+                &actual_runtime_attempts,
+            )
+            .await?;
             send_control_frame(
                 state,
                 node_id,
@@ -866,6 +898,166 @@ pub(crate) async fn handle_node_control_frame(
         }
         _ => Ok(()),
     }
+}
+
+async fn reconcile_node_runtime_actual_state(
+    state: &AppState,
+    node_id: &NodeId,
+    active_runtime_ids: &[RuntimeSessionId],
+    actual_attempts: &[RuntimeAttemptActualState],
+) -> Result<(), AppError> {
+    let now = Utc::now();
+    let mut transaction = state.pool.begin().await?;
+    for actual in actual_attempts {
+        let stored: Option<(Option<String>, Option<String>, String)> = sqlx::query_as(
+            r#"
+            select r.current_attempt_id, r.effective_policy_hash, r.execution_profile
+            from runtime_sessions r
+            join session_threads s on s.session_thread_id = r.session_thread_id
+            join project_placements p on p.project_placement_id = s.project_placement_id
+            where r.runtime_session_id = ?1 and p.node_id = ?2
+            "#,
+        )
+        .bind(actual.runtime_session_id.as_str())
+        .bind(node_id.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some((current_attempt_id, stored_policy_hash, profile)) = stored else {
+            continue;
+        };
+        if profile != "managed"
+            || stored_policy_hash.as_deref() != Some(actual.effective_policy_hash.as_str())
+        {
+            sqlx::query(
+                "update runtime_sessions set state = 'error', recovery_status = 'failed', degraded_reason = 'Node actual-state policy mismatch', updated_at = ?1 where runtime_session_id = ?2",
+            )
+            .bind(now)
+            .bind(actual.runtime_session_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
+            continue;
+        }
+        if let Some(current_attempt_id) = current_attempt_id.as_deref() {
+            if current_attempt_id != actual.runtime_attempt_id.as_str() {
+                continue;
+            }
+        } else {
+            sqlx::query(
+                r#"
+                insert into runtime_attempts (
+                    runtime_attempt_id, runtime_session_id, state, execution_profile,
+                    effective_policy_json, effective_policy_hash, provider_version,
+                    provider_resume_ref_json, start_reason, stop_reason, recovery_reason,
+                    started_at, ready_at, stopped_at, updated_at
+                )
+                select ?1, runtime_session_id, ?2, execution_profile,
+                       effective_policy_json, effective_policy_hash, null, null,
+                       'node_reconnect_reconciliation', null, 'core_restart',
+                       ?3, null, null, ?4
+                from runtime_sessions where runtime_session_id = ?5
+                on conflict(runtime_attempt_id) do nothing
+                "#,
+            )
+            .bind(actual.runtime_attempt_id.as_str())
+            .bind(format_runtime_attempt_state(actual.state))
+            .bind(actual.started_at)
+            .bind(now)
+            .bind(actual.runtime_session_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
+            sqlx::query(
+                "update runtime_sessions set current_attempt_id = ?1 where runtime_session_id = ?2 and current_attempt_id is null",
+            )
+            .bind(actual.runtime_attempt_id.as_str())
+            .bind(actual.runtime_session_id.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        }
+        let recovery_status = match actual.state {
+            RuntimeAttemptState::Disconnected => "degraded",
+            RuntimeAttemptState::Reconnecting => "reconnecting",
+            RuntimeAttemptState::Recovered => "recovered",
+            RuntimeAttemptState::Failed | RuntimeAttemptState::Lost => "failed",
+            _ => "live",
+        };
+        let pending_interactions: i64 = sqlx::query_scalar(
+            "select count(*) from provider_interactions where runtime_session_id = ?1 and state in ('requested', 'resolving')",
+        )
+        .bind(actual.runtime_session_id.as_str())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let runtime_state = if pending_interactions > 0 {
+            "blocked"
+        } else {
+            match actual.state {
+                RuntimeAttemptState::Starting => "starting",
+                RuntimeAttemptState::Ready | RuntimeAttemptState::Recovered => {
+                    if actual.active_turn_id.is_some() {
+                        "running"
+                    } else {
+                        "ready"
+                    }
+                }
+                RuntimeAttemptState::Disconnected => "stale",
+                RuntimeAttemptState::Reconnecting => "resuming",
+                RuntimeAttemptState::Stopping => "stopping",
+                RuntimeAttemptState::Stopped => "stopped",
+                RuntimeAttemptState::Failed | RuntimeAttemptState::Lost => "error",
+            }
+        };
+        sqlx::query(
+            "update runtime_attempts set state = ?1, recovery_reason = 'node_actual_state', updated_at = ?2 where runtime_attempt_id = ?3",
+        )
+        .bind(format_runtime_attempt_state(actual.state))
+        .bind(now)
+        .bind(actual.runtime_attempt_id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "update runtime_sessions set state = ?1, recovery_status = ?2, degraded_reason = null, updated_at = ?3 where runtime_session_id = ?4 and current_attempt_id = ?5",
+        )
+        .bind(runtime_state)
+        .bind(recovery_status)
+        .bind(now)
+        .bind(actual.runtime_session_id.as_str())
+        .bind(actual.runtime_attempt_id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+    }
+
+    let managed_rows: Vec<(String,)> = sqlx::query_as(
+        r#"
+        select r.runtime_session_id
+        from runtime_sessions r
+        join session_threads s on s.session_thread_id = r.session_thread_id
+        join project_placements p on p.project_placement_id = s.project_placement_id
+        where p.node_id = ?1 and r.execution_profile = 'managed'
+          and r.current_attempt_id is not null
+          and r.state not in ('stopped', 'expired', 'error')
+        "#,
+    )
+    .bind(node_id.as_str())
+    .fetch_all(&mut *transaction)
+    .await?;
+    for (runtime_session_id,) in managed_rows {
+        let reported_live = active_runtime_ids
+            .iter()
+            .any(|id| id.as_str() == runtime_session_id)
+            || actual_attempts
+                .iter()
+                .any(|attempt| attempt.runtime_session_id.as_str() == runtime_session_id);
+        if !reported_live {
+            sqlx::query(
+                "update runtime_sessions set state = 'stale', recovery_status = 'provider_resumable', degraded_reason = 'Node did not report the managed runtime after reconnect', updated_at = ?1 where runtime_session_id = ?2",
+            )
+            .bind(now)
+            .bind(&runtime_session_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+    transaction.commit().await?;
+    Ok(())
 }
 
 pub(crate) fn durable_command_result_payload(payload: &JsonValue) -> JsonValue {

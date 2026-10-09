@@ -20,6 +20,7 @@ pub mod artifacts;
 pub mod control;
 pub mod domain;
 pub mod dynamic_ui;
+pub mod managed_runtime;
 pub mod plugins;
 pub mod projection;
 pub mod reference;
@@ -33,6 +34,7 @@ pub use artifacts::*;
 pub use control::*;
 pub use domain::*;
 pub use dynamic_ui::*;
+pub use managed_runtime::*;
 pub use plugins::*;
 pub use projection::*;
 pub use reference::*;
@@ -67,6 +69,7 @@ mod tests {
         let payload = CommandPayload::SendTurn {
             content: "hello".to_owned(),
             turn_id: TurnId::from("turn-1"),
+            collaboration_mode: None,
         };
 
         assert!(payload.matches_kind(CommandKind::SendTurn));
@@ -114,6 +117,7 @@ mod tests {
             payload: CommandPayload::SendTurn {
                 content: "fixture".to_owned(),
                 turn_id: TurnId::from("turn-1"),
+                collaboration_mode: None,
             },
         };
 

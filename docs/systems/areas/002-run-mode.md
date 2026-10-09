@@ -7,13 +7,14 @@
 Uprava запускает агентскую работу в проекте, продолжает ее, наблюдает за ней и
 останавливает.
 
-Зафиксированная позиция для V01: Uprava начинает с рабочей сессии с живым
-агентским process на Node. Долговечной является **рабочая сессия**:
+Зафиксированная продуктовая позиция: основная поверхность Agent является
+рабочей сессией с живым управляемым provider runtime на Node. Долговечной
+является **рабочая сессия**:
 `SessionThread`, workspace, files, trace, diff и resume context. Сам
 provider process живет между turns, но может быть остановлен после суток без
 meaningful runtime steps и позже возрожден в том же workspace.
 
-V01 начинается с **Persistent Runtime**: Node Daemon запускает Codex
+Целевая форма начинается с **Persistent Runtime**: Node Daemon запускает Codex
 provider runtime на ноде, runtime остается живым между turn-ами, а
 пользователь может attach/detach к одной рабочей поверхности. Это ближе к
 модели T3 Code. При этом Persistent Runtime не означает бессрочный OS process:
@@ -23,6 +24,264 @@ process, но session thread, workspace state и resume context должны п�
 возродить процесс при возвращении пользователя. Позже Uprava может добавить
 stateless/ephemeral strategies, более похожие на Codbash-like resume/launcher
 подход или sandboxed task runtime.
+
+Implementation baseline `0.2.26` закрывает Managed Agent Work Loop поверх
+Node-owned managed runtime и Core-owned orchestration: Codex app-server остаётся
+живым между turns, Managed является default новых Agent sessions на capable
+Node, а существующий adapter `codex exec/resume` сохранён как отдельный явный
+compatibility mode.
+
+## Provider protocol gate 0.2.20
+
+22 июля 2026 года disposable Rust probe проверил установленный
+`codex-cli 0.144.1`. Gate пройден для **experimental Codex app-server v2** через
+локальный WebSocket. Это compatibility baseline первого managed adapter, но не
+обещание совместимости со всеми будущими Codex versions: Node обязан проверять
+provider version and required methods до объявления managed capability.
+
+Probe находится в `tools/codex-app-server-probe`, не импортирует production
+Core/Node contracts и не использует Core tables or public API. Bounded scrubbed
+wire examples сохранены рядом с tool. Реальный прогон подтвердил:
+
+- `initialize` возвращает provider metadata и `CODEX_HOME`, после чего клиент
+  отправляет `initialized`;
+- `thread/start` возвращает effective model, approval policy и полный
+  `SandboxPolicy` до первого turn;
+- два последовательных `turn/start` используют один provider thread and
+  process;
+- incremental agent deltas и typed command items приходят отдельно;
+- server-initiated `item/commandExecution/requestApproval` принимает
+  `accept` и `decline`, после чего продолжается тот же turn;
+- experimental `item/tool/requestUserInput` является отдельным request type и
+  работает в provider Plan mode; Uprava выбирает его per turn через
+  `SendTurnRequest.collaboration_mode=plan` и передаёт effective model,
+  возвращённую `thread/start` или `thread/resume`;
+- `turn/interrupt` завершает active turn со status `interrupted`;
+- `thread/unsubscribe`, новый WebSocket client и `thread/resume` сохраняют
+  identity без повторной доставки завершённых item notifications;
+- после SIGTERM или потери app-server process новый process восстанавливает
+  thread по opaque thread id; незавершённый turn после forced stop был
+  сохранён как `interrupted`;
+- изолированный Uprava-shaped Streamable HTTP MCP fixture обнаруживается через
+  `mcpServerStatus/list`; bearer credential передаётся app-server только через
+  environment indirection и не появляется в args, report or captured stderr;
+- explicit `workspace-write + untrusted` и
+  `danger-full-access + never` возвращаются как разные effective policies;
+- на проверенной машине idle RSS составил примерно 103–137 MiB, наблюдавшийся
+  active RSS 139–159 MiB, SIGTERM shutdown 20–35 ms, forced stop 2–16 ms.
+  Числа являются sizing observation, не SLO или hard limit.
+
+### Candidate inventory
+
+| Candidate | Наблюдавшийся contract | Решение |
+| --- | --- | --- |
+| `codex app-server` | stdio, loopback WebSocket, Unix/remote endpoints; typed bidirectional thread/turn protocol | Выбран v2 over loopback WebSocket |
+| remote app-server connection | Тот же protocol поверх reconnectable endpoint | Используется только локально внутри Node trust boundary |
+| `codex remote-control` | Управление и pairing app-server daemon, не отдельный session protocol | Не используется первым adapter |
+| `codex exec-server` | Experimental stdio/WebSocket execution service без доказанного interactive thread lifecycle | Не выбран |
+| `codex exec --json` | One-shot JSONL observation, resume новым process | Остаётся Exec compatibility, не managed transport |
+
+Remote-control/shared daemon не выбран: process-per-attempt лучше изолирует
+policy, cancellation, crash and resource accounting. `app-server` запускается
+с loopback-only endpoint; Web and Core не получают прямой provider socket.
+
+### Identity and ownership
+
+Протокольный spike подтвердил три разных уровня identity:
+
+```text
+SessionThread
+  durable Core-owned user conversation and work context
+
+RuntimeSession
+  durable Core-owned runtime lineage and selected execution profile
+
+RuntimeAttempt
+  one Node-owned app-server process, local endpoint and policy snapshot
+```
+
+Provider thread id является opaque resume reference RuntimeSession. Core может
+хранить его в bounded provider-specific resume envelope, но не показывает в
+обычных logs, prompts or Web payloads. Process id, socket/port, pending JSON-RPC
+request ids, bearer values and live transport handles принадлежат только Node
+RuntimeAttempt и не сохраняются в Core.
+
+Authentication and `CODEX_HOME` принадлежат credential profile process-а на
+Node. Core хранит только non-secret profile reference; путь `CODEX_HOME`, auth
+files and token values не входят в effective policy payload or provider args.
+
+Первый adapter использует один app-server process на RuntimeAttempt. Один
+RuntimeSession допускает не больше одного active turn. Node владеет provider
+connection и reconnect; Web attach/detach происходит через Core и не касается
+provider transport. После Node restart создаётся новый RuntimeAttempt и
+выполняется explicit `thread/resume`, а не reattach по одному stale PID.
+
+### Ordering, reconnect and recovery limits
+
+WebSocket сохраняет порядок frames одного connection, request/response
+correlation использует provider request id. Provider protocol не отдаёт
+durable global event sequence или replay cursor. Persisted thread history
+намеренно lossy для command/tool items. Поэтому Node присваивает собственную
+монотонную attempt sequence каждому normalized event до отправки в Core.
+
+Reconnect на idle thread подтверждён. Transport gap во время active turn не
+обещает lossless replay: adapter должен выполнить resume/read reconciliation,
+не повторять уже mapped item ids и пометить trace gap typed degraded recovery,
+если точный stream восстановить нельзя. Silent reconstruction assistant text
+или переход в Exec compatibility запрещены.
+
+`thread/start` без первого turn ещё не создаёт persisted rollout; такой thread
+нельзя считать provider-resumable. RuntimeAttempt переходит в durable
+resumable state только после получения provider thread identity и успешного
+начала первого turn. Это должно быть отражено отдельными `starting`, `ready`
+and recovery states, а не одним optimistic start flag.
+
+### Interaction, stop and policy contracts
+
+Provider execution approval и provider user input имеют разные methods,
+payloads and responses. Core может переиспользовать UI primitives, но хранит
+разные interaction kinds. Provider `decline` продолжает turn, `cancel`
+прерывает его; Uprava deny baseline использует `decline`, если человек отдельно
+не выбрал cancel.
+
+Interrupt сначала вызывает `turn/interrupt`. Stop закрывает transport и
+посылает SIGTERM конкретной process group; после bounded timeout Node применяет
+SIGKILL только к тому же RuntimeAttempt. Stop сохраняет opaque thread resume
+reference, но не обещает сохранение in-memory state.
+
+Минимальный enforceable policy первого adapter включает provider version,
+model/provider, cwd and runtime workspace roots, sandbox policy, approval
+policy/reviewer, MCP server summary and bearer-token env reference. Network
+posture сохраняется только если присутствует в returned `SandboxPolicy` or
+permission profile; неизвестное значение не выводится из requested config.
+
+User input остаётся experimental capability в baseline `0.144.1`. Если version
+probe, method inventory, policy echo, approval, interrupt, reconnect/resume or
+MCP readiness не подтверждены, Node сообщает typed managed capability reason и
+Core отклоняет Managed start. Exec compatibility не включается автоматически.
+
+### Shared contract and persistence foundation 0.2.21
+
+Implementation baseline `0.2.21` закрепляет provider-neutral foundation до
+реализации живого Node driver:
+
+- `AgentExecutionProfile` имеет только `managed` и `exec_compatibility`;
+  отсутствие profile в API и все migrated sessions сохраняют compatibility
+  posture;
+- Core рассчитывает до dispatch immutable `EffectiveRuntimePolicy`, хранит
+  canonical JSON и `sha256` hash и передаёт snapshot/hash в typed Start/Resume;
+- migration 18 добавляет current attempt/recovery projection,
+  `runtime_attempts` и `provider_interactions`; process handles, sockets,
+  bearer tokens и secret values в Core DB не попадают;
+- approval и user input имеют разные interaction kinds и команды, interrupt и
+  stop адресуют текущий attempt, если он уже известен;
+- Node capabilities разделены на exec, managed, approval, interrupt и resume.
+  До поставки managed driver соответствующие managed facts имеют состояние
+  unavailable с bounded reason;
+- Core требует весь managed capability set и возвращает typed
+  `runtime.profile_capability_unavailable`. Создание Exec session или retry с
+  другим profile при этом не происходит;
+- internal Job runtime явно использует `exec_compatibility`; Task Run contract
+  не импортирует Agent execution profile и остаётся OpenSandbox-owned.
+
+### Node-managed Codex runtime 0.2.22
+
+Implementation baseline `0.2.22` материализует data-plane owner:
+
+- `AgentRuntimeDriver` разделяет `CodexManagedDriver` и независимый
+  `CodexExecCompatibilityDriver`; Task runtime не импортирует Agent driver;
+- `ManagedRuntimeSupervisor` владеет отдельным app-server process и loopback
+  WebSocket на RuntimeAttempt, сериализует provider operations и завершает
+  process group на stop/shutdown;
+- Start/Resume валидирует managed profile, immutable effective policy и hash до
+  запуска; provider transport handle, JSON-RPC ids, socket and MCP token не
+  попадают в durable state or logs;
+- deltas, completed messages, structured activity, approval и user input
+  преобразуются в provider-neutral typed events; unknown/oversized payloads
+  ограничиваются и отмечаются как protocol drift;
+- approval/input decision продолжает тот же active provider turn; duplicate or
+  late interaction получает typed terminal conflict;
+- cancellation вызывает `turn/interrupt`, а Stop сохраняет opaque thread id как
+  resume reference и завершает только process group текущего attempt;
+- local durable descriptor хранит attempt/thread identity, policy hash, active
+  Uprava turn and terminal reason. После Node restart непроверяемый live handle
+  становится `lost/stale`; автоматического перехода в Exec compatibility нет;
+- deterministic fake app-server regression покрывает two-turn live thread,
+  approval/input continuation and stop. Exec compatibility regression и
+  OpenSandbox Task execution остаются неизменными.
+
+Managed capabilities объявляются available только при доступном Codex binary с
+распознанной совместимой версией.
+Это ещё не default-on gate: Web interaction cards и реальная
+acceptance/recovery matrix закрываются этапами 4–5.
+
+### Core orchestration baseline 0.2.23
+
+Implementation baseline `0.2.23` материализует control-plane authority:
+
+- policy preview и session creation используют один resolver; profile,
+  immutable policy/hash, Start command и audit фиксируются одной транзакцией;
+- явный Exec compatibility selection записывается как unsafe policy audit;
+  отсутствие profile выбирает Managed и проходит тот же capability gate;
+- provider interaction проходит `requested -> resolving -> approved | denied |
+  answered`, либо `expired | cancelled | superseded`; Core записывает decision
+  intent вместе с dispatch command, а provider event остаётся единственным
+  подтверждением continuation;
+- interaction request блокирует active turn/runtime, provider confirmation
+  возвращает его в `running`, assistant completion завершает turn, а stale или
+  conflicting attempt/event не меняет current projection;
+- control `Hello` несёт secret-free actual attempt report с runtime/attempt
+  identity, state и policy hash. Core принимает только current attempt,
+  восстанавливает пропущенный projection при совпавшей policy и не оживляет
+  superseded attempt;
+- recovery и interaction lifecycle пишут bounded audit и Prometheus series с
+  labels только provider/profile/state, без session id, prompt или workspace
+  content.
+
+Это закрывает этап 3; Web work surface закрыт baseline `0.2.24`, rollout и
+default-on closure — baseline `0.2.25`, deployment hardening — `0.2.26`.
+
+### Agent Web work surface baseline 0.2.24
+
+Web использует уже зафиксированные Core contracts без собственного durable
+runtime state:
+
+- Start Agent оставляет `exec_compatibility` opt-in-slice default, показывает
+  доступный Managed как recommended и требует явного acknowledgement перед
+  unrestricted compatibility start;
+- policy preview показывает target Node/workspace, sandbox, approvals, network
+  posture и recovery strategy до команды Start; выбранный profile передаётся в
+  create-session request и после создания не меняется UI toggle;
+- Agent timeline сохраняет assistant messages, bounded command/tool/file
+  activity, typed provider interaction и raw diagnostic fallback как semantic
+  blocks, не как ANSI terminal mirror;
+- pending approval и user input имеют разные keyboard-accessible cards и
+  endpoints; `resolving` блокирует повторную отправку до provider confirmation;
+- mode/policy warning и diagnostics постоянно показывают driver/version,
+  policy/hash, current attempt, recovery reason/status и last activity;
+- lifecycle controls строятся из projected capabilities; managed interrupt не
+  показывается для Exec compatibility, Detach не останавливает runtime, а
+  Stop сохраняет durable session history.
+
+В baseline `0.2.24` Managed ещё остаётся явным opt-in; смена default происходит
+только в следующем stage 5 после real-provider, recovery and controlled-rollout
+gate.
+
+### Recovery и default-on closure 0.2.25
+
+Stage 5 меняет только создание новых Agent sessions. Web выбирает Managed при
+available `provider.codex.managed`; Create Session API также трактует missing
+profile как Managed и возвращает typed capability error на incapable Node без
+создания Exec runtime. Existing sessions сохраняют profile migration 18,
+internal Jobs продолжают явно выбирать Exec compatibility, а Task Run не
+создаёт interactive session.
+
+Node очищает inherited environment provider child process и возвращает только
+allowlisted OS/auth/proxy variables плюс отдельный ephemeral MCP token env.
+Host-only `make codex-smoke` проверяет safe default policy, sequential Managed
+turns, detach/reattach, stop/resume, reload и явный compatibility turn; полный
+operator/recovery порядок зафиксирован в
+[`managed-agent-runtime.md`](../../runbooks/managed-agent-runtime.md).
 
 Дополнительное уточнение: V01 является **Codex-first**, но не должен
 становиться **Codex-only** в продуктовой модели. Первый adapter может быть
@@ -86,15 +345,19 @@ Run Mode нужно разложить на несколько слоев:
 1. **Work Contract** - как пользователь понимает работу: interactive session,
    bounded task, review run, fix run, research run.
 2. **Runtime Strategy** - как живет агентский runtime/process: persistent,
-   stateless/ephemeral, sandboxed, external provider, hybrid.
-3. **Session Thread** - долговечная история диалога, turns, activity, trace и
+   stateless/ephemeral, sandboxed, external provider or sessionless one-shot.
+3. **Provider Execution Driver** - двусторонний managed protocol или one-shot
+   `exec/resume` compatibility path.
+4. **Effective Execution Policy** - provider sandbox, approval behavior,
+   writable scope, credentials, network and unsafe overrides.
+5. **Session Thread** - долговечная история диалога, turns, activity, trace и
    review state.
-4. **Project Placement** - Core-owned physical binding выбранной Node и
+6. **Project Placement** - Core-owned physical binding выбранной Node и
    canonical workspace path; checkout, branch/worktree, env и local
    capabilities являются facts этого Placement.
-5. **Runtime Session** - live provider runtime/process, если он сейчас
+7. **Runtime Session** - live provider runtime/process, если он сейчас
    запущен и управляется Node Daemon.
-6. **Turn** - один пользовательский input и связанный цикл работы агента до
+8. **Turn** - один пользовательский input и связанный цикл работы агента до
    `idle`, `blocked`, `interrupted`, `completed` или `error`.
 
 В V01 основной вариант:
@@ -139,7 +402,9 @@ Node Daemon запускает provider runtime и держит его живы�
 - managed lifetime with idle expiry;
 - better control-plane integration than plain terminal launcher.
 
-Это default для V01 и first Codex implementation.
+Это целевой default для поверхности Agent. До пункта `16` первый Codex adapter
+реализует stateless exec/resume compatibility path, а не provider-native live
+runtime.
 
 #### Runtime lifetime policy
 
@@ -204,10 +469,13 @@ ProjectPlacement, trace и provider history, но не OS process.
 
 Это ближе к Codbash-like подходу: session identity и history существуют в
 agent storage/logs, а продолжение может происходить через `codex resume`,
-`claude --resume` или similar launch command. Такой подход полезен как fallback,
-compatibility mode или task-oriented runtime, но он слабее для reliable
-streaming, approvals, interrupts и structured trace, если Uprava не владеет
-runtime protocol.
+`claude --resume` или similar launch command. Такой подход сохраняется как
+явный **Exec compatibility mode** для Agent и как естественный one-shot driver
+для Jobs/Tasks. В Agent он слабее для reliable streaming, approvals, interrupts
+и structured trace, если Uprava не владеет runtime protocol. Текущий Agent
+compatibility profile использует `--dangerously-bypass-approvals-and-sandbox`;
+UI не должен включать его скрыто или выдавать normalized approval events за
+настоящий approval continuation.
 
 #### Sandboxed Runtime
 
@@ -216,11 +484,12 @@ workspace создается под bounded work: отдельная папка,
 container, microVM или external sandbox provider. Это естественная база для
 future bounded tasks, но V01 не должен начинаться с нее.
 
-#### Hybrid Runtime
+#### Future hybrid composition
 
-Hybrid strategy появляется позже: persistent interactive session может
-порождать bounded stateless/sandboxed runs для отдельных подзадач, а результаты
-возвращаются в общий thread/workflow state.
+Managed Agent позже может получить tool для запуска bounded sandboxed runs, но
+это не определяет основной Agent work contract и не входит в exit criteria
+`Managed Agent Work Loop`. Task Run остаётся самостоятельной сущностью со своей
+изоляцией, evidence и review contract.
 
 ### Work contracts
 
@@ -284,7 +553,7 @@ user-input, Node Daemon нормализует request и стримит его 
 показывает blocking state и action. Ответ пользователя возвращается в тот же
 live runtime.
 
-#### 6. Queue direction: task-like launch
+#### 6. Future optional composition: task-like launch
 
 Позже пользователь сможет сказать "сделай bounded run из этой session":
 зафиксировать goal/scope, создать isolated workspace, запустить agent step и
@@ -312,7 +581,7 @@ V01, но Run Mode должен не закрывать такой путь.
 
 ### First release vs later
 
-#### V01
+#### V01 design contract
 
 Для Distributed Agent Control Panel нужно:
 
@@ -355,19 +624,26 @@ launch, resume, approval и event semantics начнут протекать в C
 trace model, а будущие OpenCode/Claude Code adapters придется добавлять через
 ломку доменной модели.
 
+Фактический V01 adapter поставил долговечный `SessionThread`, Core/Node
+lifecycle, events и provider resume reference, но реализовал turn через новый
+`codex exec/resume` process. Это compatibility approximation исходного
+контракта, а не доказательство живого provider-native runtime. Разрыв закрывает
+пункт `16 Managed Agent Work Loop`.
+
 #### Later
 
-Later versions can add:
+Post-V01 versions добавляют или уже добавили:
 
 - file browser and read-only workspace inspector;
 - terminal/output view;
 - basic diff per turn or since baseline;
-- stateless/ephemeral runtime as compatibility/fallback strategy;
+- provider-native managed runtime как основной Agent driver;
+- явный stateless/ephemeral exec compatibility mode;
 - richer lease policies, configurable TTLs, quotas и per-project runtime
   budgets;
 - sandboxed runtime for bounded work;
 - task contract with context package и review contract;
-- hybrid sessions that spawn bounded task runs;
+- опциональный Agent tool для bounded task delegation;
 - richer checkpoints и rollback;
 - multiple concurrent runtimes per project;
 - session handoff between providers;
@@ -376,9 +652,9 @@ Later versions can add:
 
 ## Architecture
 
-### V01 implementation: Process-backed Interactive Session
+### Target Agent implementation: Provider-native Managed Interactive Session
 
-Первый конкретный режим Uprava:
+Целевой основной режим Uprava:
 
 - runtime strategy: **Persistent Runtime**;
 - work contract: **Interactive Session**;
@@ -387,7 +663,7 @@ Later versions can add:
 - durable control plane: **Core**;
 - first client: **Web Control Panel**.
 
-Рабочее название внутри архитектуры: **Process-backed Interactive Session**.
+Рабочее название внутри архитектуры: **Managed Interactive Session**.
 Это живая рабочая сессия в проекте, где пользовательский thread долговечен, а
 provider process живет на Node между turns, пока active runtime window не
 истек.
@@ -406,11 +682,29 @@ provider process живет на Node между turns, пока active runtime 
 - если provider-native resume невозможен, UI показывает degraded resume, а не
   притворяется, что live state полностью восстановлен.
 
-V01 не реализует bounded tasks, workflow engine, sandbox orchestration,
-multi-agent scheduling или full generic provider platform. Но модель должна
-иметь минимальный Provider Adapter boundary и быть достаточно общей, чтобы
-новые agents, runtime strategies и work contracts позже добавились как
-расширения, а не как отдельный продукт.
+Provider-native здесь означает семантические возможности живого Codex runtime:
+двусторонний event/control protocol, approvals, questions, tool/command
+activity, streaming, interrupt and reconnect. Это не означает встраивание
+Codex TUI или эмуляцию terminal UI в Web Control Panel.
+
+Текущий compatibility baseline сохраняет тот же `SessionThread` и
+`RuntimeSession` control plane, но под каждым turn запускает
+`codex exec/resume`. Он остаётся поддерживаемым явным fallback после появления
+managed driver.
+
+### Execution profiles by product surface
+
+| Surface | Driver | Provider policy | Human interaction |
+| --- | --- | --- | --- |
+| Agent / Managed | Provider-native managed protocol | Safe sandbox; effective policy видна | Real approvals, questions, interrupt |
+| Agent / Exec compatibility | `codex exec/resume` | `--dangerously-bypass-approvals-and-sandbox` | Нет настоящего approval continuation |
+| Tasks | One-shot `codex exec` inside OpenSandbox | Provider unrestricted; внешний sandbox является boundary | Нет интерактивной сессии |
+| Jobs target | Sessionless one-shot `codex exec` | Sandbox enabled; non-interactive approval policy | Запрещённое действие возвращается модели как failure |
+
+Профиль является частью work contract и effective policy snapshot. Node не
+должен незаметно переключать Agent из managed safe profile в unrestricted exec
+fallback. Tasks и Jobs не создают пользовательскую Agent session только ради
+переиспользования provider adapter.
 
 ### Responsibility boundaries
 
@@ -1046,12 +1340,14 @@ Agent не должен получать broad Uprava admin credentials толь
   binding entity.
 - Core event subscription endpoint для session thread updates.
 - Node command handler для start/resume/send/approve/interrupt/stop.
-- Codex provider adapter behind the Provider Adapter boundary. V01 first
-  adapter uses CLI exec/resume continuity; provider-native live process/session
-  ownership is post-V01 work.
+- Codex provider adapter находится за Provider Adapter boundary. Managed
+  profile владеет живым app-server process/session на Node; CLI `exec/resume`
+  сохранён только как явный compatibility profile без silent fallback.
 - Persist provider resume cursor/session id when available.
 - Track `last_runtime_step_at` from meaningful runtime events.
-- 24h no-steps expiry loop в Node.
+- 24h no-steps expiry scheduler в Core создаёт system `StopRuntime`; Node
+  подтверждает terminal teardown, после чего Core отзывает MCP lease и
+  закрывает pending interactions.
 - Runtime resurrection path для expired sessions.
 - UI states: `ready`, `running`, `blocked`, `expired`, `resuming`, `stale`,
   `stopped` и `error`.
@@ -1059,8 +1355,6 @@ Agent не должен получать broad Uprava admin credentials толь
 
 ### Remaining architecture questions
 
-- When should post-V01 adopt provider-native Codex app-server/live protocol
-  instead of the V01 CLI exec/resume adapter?
 - How much provider raw event data should Core persist for debugging, and how
   much should be normalized only?
 - Do we need per-turn diff attribution in V01, or is session-level diff

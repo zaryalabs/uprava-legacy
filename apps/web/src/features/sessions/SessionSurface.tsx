@@ -22,6 +22,7 @@ import { routeWithSearch, workspaceAgentRoute } from "../workspaces/routes";
 import { ChatComposer } from "./ChatComposer";
 import { CausalityPanel } from "./CausalityPanel";
 import { LifecycleControls } from "./LifecycleControls";
+import { RuntimePolicyPanel } from "./RuntimePolicyPanel";
 import { ScheduledMessagesPanel } from "./ScheduledMessagesPanel";
 import { sessionAttention } from "./session-attention";
 import { SessionTimeline } from "./SessionTimeline";
@@ -55,11 +56,15 @@ export function SessionSurface({
     ]);
   };
   const sendTurn = useMutation({
-    mutationFn: (content: string) =>
+    mutationFn: (request: {
+      content: string;
+      collaborationMode: "default" | "plan";
+    }) =>
       runWorkbenchCommand("session.sendTurn", {
         session: session.data?.session,
         runtime: session.data?.session.runtime,
-        turnContent: content,
+        turnContent: request.content,
+        turnCollaborationMode: request.collaborationMode,
         availableCommands: agentProjection.data?.available_commands,
         afterSuccess: invalidateSession,
       }),
@@ -124,8 +129,10 @@ export function SessionSurface({
       <header className="uprava-session-header grid gap-4 border-b border-[var(--color-border)] pb-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <div className="min-w-0">
           <div className="zarya-caption">
-            SESSION / {session.data.session.runtime.provider} /{" "}
-            {session.data.session.runtime.state}
+            SESSION /{" "}
+            {session.data.session.runtime.execution_profile ??
+              "exec_compatibility"}{" "}
+            / {session.data.session.runtime.state}
           </div>
           <h2
             id="session-surface-title"
@@ -189,8 +196,8 @@ export function SessionSurface({
               : "unavailable"}
           </div>
           <div className="mt-1 text-xs text-[var(--color-muted)]">
-            Stop and interrupt can end active work. Detach preserves the managed
-            runtime.
+            Detach closes this surface without stopping the provider runtime.
+            Stop preserves the session history.
           </div>
         </div>
         <LifecycleControls
@@ -198,6 +205,9 @@ export function SessionSurface({
           runtime={session.data.session.runtime}
           availableCommands={agentProjection.data?.available_commands ?? []}
         />
+        <div className="md:col-span-2">
+          <RuntimePolicyPanel runtime={session.data.session.runtime} />
+        </div>
       </section>
 
       <div className="space-y-4 pt-4">
@@ -237,7 +247,14 @@ export function SessionSurface({
             <ChatComposer
               pending={sendTurn.isPending}
               disabled={!canSendTurn}
-              onSend={(content) => sendTurn.mutateAsync(content).then(() => {})}
+              supportsPlanMode={
+                session.data.session.runtime.execution_profile === "managed"
+              }
+              onSend={(content, collaborationMode) =>
+                sendTurn
+                  .mutateAsync({ content, collaborationMode })
+                  .then(() => {})
+              }
             />
             <ScheduledMessagesPanel
               sessionThreadId={session.data.session.session_thread_id}

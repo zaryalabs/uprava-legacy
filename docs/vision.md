@@ -36,7 +36,13 @@ Uprava решает это не через "еще один чат", а чере
 
 Uprava должен стать системой, где агентская работа имеет управляемую форму.
 
-Человек не просто пишет prompt и ждет ответ. Он выбирает проект, ноду, агента, режим выполнения, workflow, допустимые границы, ожидаемые доказательства и критерии приемки. Иногда это живой агентский процесс, к которому человек подключается и с которым работает интерактивно. Иногда это task-based запуск в изолированном окружении. Иногда это гибрид, где постоянная сессия порождает bounded runs для отдельных подзадач.
+Человек не просто пишет prompt и ждет ответ. Он выбирает проект, ноду, агента,
+режим выполнения, workflow, допустимые границы, ожидаемые доказательства и
+критерии приемки. Основная поверхность Agent — живой управляемый provider
+runtime, к которому человек подключается и с которым работает интерактивно.
+Tasks используют bounded запуск в изолированном окружении, а Jobs — unattended
+one-shot execution. Эти work contracts могут использовать одного provider, но
+не обязаны делить session lifecycle или execution policy.
 
 Агент работает в наблюдаемом окружении. Система показывает ход работы, изменения, проверки, риски и артефакты. Результат становится принимаемым work item только после review, correction, integration и ownership decision.
 
@@ -61,7 +67,9 @@ Uprava должен делать этот цикл дешевле, прозра�
 - **Workspace** - конкретное окружение выполнения задачи: checkout, branch, sandbox, mounted files, env, running tools.
 - **Agent Session** - живой агентский процесс или подключение к внешнему агенту, к которому можно attach/detach, продолжать диалог, смотреть состояние и управлять окружением.
 - **Agent Run** - ограниченный эпизод работы агента с целью, scope, контекстом, событиями, логами, изменениями, проверками и результатом.
-- **Execution Mode** - способ выполнения агентской работы: persistent session, task-based run или hybrid mode.
+- **Execution Mode** - способ выполнения агентской работы: managed Agent
+  session, Agent exec compatibility mode, task-based sandbox run или
+  sessionless Job Run.
 - **Workflow** - долговечное состояние работы, которое может переживать перезапуск агента, контейнера или ноды.
 - **Artifact** - результат работы агента, который может быть текстом, diff, файлом, dashboard, UML, формой, отчетом, графиком, embedded tool или кастомным UI-блоком.
 - **Tool Registry** - Core-owned реестр managed tools и observed capabilities:
@@ -76,9 +84,12 @@ Uprava должен делать этот цикл дешевле, прозра�
 
 ## Режимы выполнения
 
-Uprava не должен быть привязан к одному cloud-agent flow. Task-based sandbox подход важен, но это только один режим. Минимальная модель должна поддерживать как минимум два режима, а в перспективе - гибрид между ними.
+Uprava не должен быть привязан к одному cloud-agent flow. Task-based sandbox
+подход важен, но это только один режим. Модель должна явно различать живой
+Managed Agent, Agent exec compatibility, sandboxed Tasks и sessionless Jobs, а
+будущую композицию между ними добавлять без смешивания lifecycle contracts.
 
-### Persistent agent session
+### Managed Agent Work Loop
 
 Агент запускается как живой процесс или подключается как внешний interactive agent. Пользователь может подключиться к нему, продолжать диалог, смотреть терминал/логи/файлы, давать уточнения и управлять процессом почти как рабочей сессией.
 
@@ -94,9 +105,17 @@ Uprava не должен быть привязан к одному cloud-agent f
 
 - attach/detach к живому агенту;
 - долгоживущий контекст процесса;
+- provider-native streaming, approvals, questions and interruption;
 - видимость файлов, терминала, команд и текущего состояния;
 - ручное управление ходом работы;
+- controlled stop, reconnect and resume;
 - trace как журнал сессии и важных решений, а не только финальный report.
+
+Uprava получает TUI-equivalent возможности через provider-native semantic
+protocol. Codex TUI не встраивается и не эмулируется в Web Control Panel.
+Нынешний `codex exec/resume` path сохраняется как явный unrestricted
+compatibility mode, а provider-native managed runtime является default для
+новых Agent sessions на capable Nodes.
 
 ### Task-based sandbox run
 
@@ -120,13 +139,13 @@ Uprava не должен быть привязан к одному cloud-agent f
 - review-ready output;
 - durable workflow state вместо привязки к живому процессу.
 
-### Hybrid managed session
+### Future Agent-to-Task delegation
 
-Гибридный режим соединяет постоянную интерактивную сессию и task-based подзапуски. Пользователь работает с живым агентом или orchestration agent, а тот может создавать изолированные task runs для отдельных подзадач: проверить гипотезу, сделать diff, запустить CI-fix, подготовить артефакт, провести review.
-
-Такой режим может быть близок к тому, как ощущаются современные cloud coding agents, но с большей прозрачностью: пользователь видит и управляющую сессию, и отдельные bounded runs, которые она порождает.
-
-Ключевой вопрос для дизайна: где проходит граница между живым контекстом сессии и воспроизводимым state/trace отдельных task runs.
+Managed Agent позже может запускать изолированные Task Runs для отдельных
+подзадач через явный tool contract. Это полезная композиция двух поверхностей,
+но не headline Managed Agent Work Loop: Task сохраняет собственные scope,
+isolation, evidence and review semantics, а его state не растворяется в live
+session.
 
 ## Принципы
 
@@ -211,9 +230,8 @@ Uprava должен усиливать человека, а не вытесня�
 - Node Daemon на ноде, который умеет запускать Codex-backed runtime and report
   state;
 - привязка agent session к node, project and workspace;
-- один реализованный execution mode: persistent interactive session;
-- task-based and hybrid modes сохраняются как architecture directions, а не V01
-  implementation;
+- один первый Agent execution mode: exec/resume-backed interactive session;
+- provider-native managed runtime сохраняется как целевая основная форма Agent;
 - chat как первый интерфейс к session;
 - navigation формата `Nodes -> Projects/Workspaces -> Sessions`;
 - lifecycle controls: start, attach, detach, interrupt, stop, resume and return
@@ -230,13 +248,16 @@ Uprava должен усиливать человека, а не вытесня�
 
 ```text
 persistent:
-node/project/session tree -> start or attach agent session -> chat -> lifecycle/events -> stop/resume
+node/project/session tree -> start or attach managed agent session -> live activity/approvals -> stop/resume
+
+agent compatibility:
+session thread -> codex exec/resume -> unrestricted warning -> lifecycle/events
 
 task-based:
-future task -> agent run -> sandbox/tools -> diff -> checks -> trace -> review -> MR/PR
+task -> codex exec in external sandbox -> diff -> checks -> trace -> review
 
-hybrid:
-future session -> spawn bounded task runs -> review artifacts -> merge state back into session/workflow
+jobs:
+job run -> sessionless sandboxed exec -> output/summary -> terminal outcome
 ```
 
 Цель первого слоя - доказать, что Uprava дает больше прозрачности и управляемости, чем обычный чат с агентом.
@@ -298,7 +319,8 @@ future session -> spawn bounded task runs -> review artifacts -> merge state bac
 
 - Что является минимальной единицей работы: task, agent run, workflow или artifact?
 - Какой объект является верхним в UX: persistent session, task, workflow или project work surface?
-- Как именно устроить hybrid mode между живой сессией и isolated task runs?
+- Как позже добавить Agent-to-Task delegation, не смешав live session context с
+  bounded Task scope, isolation and review contract?
 - Насколько жестко первый продукт должен быть завязан на software development?
 - Делаем ли durable workflow engine своим слоем или сначала интегрируем готовый?
 - Какой минимальный plugin/block API нужен уже в первой версии?

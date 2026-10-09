@@ -23,10 +23,15 @@ pub struct SessionSummary {
 pub struct RuntimeSummary {
     pub runtime_session_id: RuntimeSessionId,
     pub provider: String,
+    pub execution_profile: AgentExecutionProfile,
     pub state: RuntimeSessionState,
     pub resume_supported: bool,
     pub degraded_reason: Option<String>,
     pub last_runtime_step_at: Option<DateTime<Utc>>,
+    pub current_attempt: Option<RuntimeAttemptSummary>,
+    pub effective_policy: Option<EffectiveRuntimePolicy>,
+    pub effective_policy_hash: Option<RuntimePolicyHash>,
+    pub recovery_status: RuntimeRecoveryStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +41,8 @@ pub struct SessionDetail {
     pub messages: Vec<Message>,
     pub events: Vec<EventEnvelope>,
     pub scheduled_messages: Vec<ScheduledSessionMessage>,
+    #[serde(default)]
+    pub pending_interactions: Vec<ProviderInteractionSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -97,8 +104,26 @@ pub struct CreateSessionRequest {
     pub project_placement_id: ProjectPlacementId,
     pub title: Option<String>,
     pub provider: String,
+    /// Missing selects the safe Managed profile; callers must request Exec compatibility explicitly.
+    #[serde(default)]
+    pub execution_profile: Option<AgentExecutionProfile>,
     #[serde(default)]
     pub force: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewSessionPolicyRequest {
+    pub project_placement_id: ProjectPlacementId,
+    pub provider: String,
+    pub execution_profile: AgentExecutionProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPolicyPreview {
+    pub project_placement_id: ProjectPlacementId,
+    pub node_id: NodeId,
+    pub effective_policy: EffectiveRuntimePolicy,
+    pub effective_policy_hash: RuntimePolicyHash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +229,8 @@ pub struct ProviderQuotaStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SendTurnRequest {
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collaboration_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +251,11 @@ pub struct UpdateScheduledMessageRequest {
 pub struct ResolveApprovalRequest {
     pub approved: bool,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmitProviderInputRequest {
+    pub answers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

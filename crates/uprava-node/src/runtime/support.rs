@@ -18,7 +18,17 @@ pub(crate) fn control_url(core_url: &Url) -> anyhow::Result<Url> {
 
 pub(crate) fn capabilities(config: &NodeConfig) -> Vec<CapabilitySummary> {
     let codex_available = command_available(&config.codex_binary);
+    let codex_managed_available = codex_available
+        && config.codex_managed_unavailable_reason.is_none()
+        && config.codex_version.is_some();
     vec![
+        CapabilitySummary {
+            key: "provider.codex.version".to_owned(),
+            value: CapabilityValue::Extension {
+                name: "provider_version".to_owned(),
+                value: JsonValue(serde_json::json!(config.codex_version)),
+            },
+        },
         CapabilitySummary {
             key: "provider.codex".to_owned(),
             value: CapabilityValue::Provider {
@@ -27,6 +37,62 @@ pub(crate) fn capabilities(config: &NodeConfig) -> Vec<CapabilitySummary> {
                 mode: "exec".to_owned(),
                 timeout_seconds: Some(config.codex_timeout.as_secs()),
                 unavailable_reason: (!codex_available).then(|| "binary_not_found".to_owned()),
+            },
+        },
+        CapabilitySummary {
+            key: ProviderRuntimeCapability::CodexExec.as_str().to_owned(),
+            value: CapabilityValue::Provider {
+                available: codex_available,
+                configured: true,
+                mode: "exec_compatibility".to_owned(),
+                timeout_seconds: Some(config.codex_timeout.as_secs()),
+                unavailable_reason: (!codex_available).then(|| "binary_not_found".to_owned()),
+            },
+        },
+        CapabilitySummary {
+            key: ProviderRuntimeCapability::CodexManaged.as_str().to_owned(),
+            value: CapabilityValue::Provider {
+                available: codex_managed_available,
+                configured: true,
+                mode: "managed".to_owned(),
+                timeout_seconds: Some(config.codex_timeout.as_secs()),
+                unavailable_reason: config.codex_managed_unavailable_reason.clone(),
+            },
+        },
+        CapabilitySummary {
+            key: ProviderRuntimeCapability::CodexManagedApproval
+                .as_str()
+                .to_owned(),
+            value: CapabilityValue::Provider {
+                available: codex_managed_available,
+                configured: true,
+                mode: "managed".to_owned(),
+                timeout_seconds: Some(config.codex_timeout.as_secs()),
+                unavailable_reason: config.codex_managed_unavailable_reason.clone(),
+            },
+        },
+        CapabilitySummary {
+            key: ProviderRuntimeCapability::CodexManagedInterrupt
+                .as_str()
+                .to_owned(),
+            value: CapabilityValue::Provider {
+                available: codex_managed_available,
+                configured: true,
+                mode: "managed".to_owned(),
+                timeout_seconds: Some(config.codex_timeout.as_secs()),
+                unavailable_reason: config.codex_managed_unavailable_reason.clone(),
+            },
+        },
+        CapabilitySummary {
+            key: ProviderRuntimeCapability::CodexManagedResume
+                .as_str()
+                .to_owned(),
+            value: CapabilityValue::Provider {
+                available: codex_managed_available,
+                configured: true,
+                mode: "managed".to_owned(),
+                timeout_seconds: Some(config.codex_timeout.as_secs()),
+                unavailable_reason: config.codex_managed_unavailable_reason.clone(),
             },
         },
         CapabilitySummary {

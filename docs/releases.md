@@ -2,7 +2,7 @@
 
 Статус: `active`
 
-Current release baseline: `0.2.19`.
+Current release baseline: `0.2.26`.
 
 Этот ledger фиксирует implementation baselines. Он не заменяет
 [`feature-queue.md`](product/feature-queue.md), где остается ранжированная очередь
@@ -40,16 +40,98 @@ future work.
 | `0.2.16` | 2026-07-21 | shipped | Plugin contribution resolution: normalized targets, deterministic exclusive chains, revisioned order/disable preferences, visible conflicts и bundled Markdown/Plain Text fallback chain |
 | `0.2.17` | 2026-07-21 | shipped | Plugin-driven Visual Artifact System: generic versioned artifacts, source matchers, inline/block/artifact viewers и bundled color, diagram, review and trace plugins с mandatory fallbacks |
 | `0.2.18` | 2026-07-21 | shipped | Dynamic UI from Agents: opt-in Generated React plugin, controlled builder, sandboxed iframe, Uprava UI SDK, persisted state, permissioned actions и safe fallbacks |
-| `0.2.19` | 2026-07-21 | current | Task-based sandbox runtime mechanics: durable Task Runs, isolated Git worktrees, Docker/OpenSandbox execution, cancel/recovery, bounded evidence, Tasks UI и immutable Codex runtime image; credential profiles отложены |
+| `0.2.19` | 2026-07-21 | shipped | Task-based sandbox runtime mechanics: durable Task Runs, isolated Git worktrees, Docker/OpenSandbox execution, cancel/recovery, bounded evidence, Tasks UI и immutable Codex runtime image; credential profiles отложены |
+| `0.2.20` | 2026-07-22 | shipped | Managed Agent Work Loop protocol gate: Codex app-server 0.144.1 spike, process-per-attempt architecture, scrubbed fixtures и measured approval/input/interrupt/reconnect/resume policy evidence |
+| `0.2.21` | 2026-07-22 | shipped | Managed Agent Work Loop stage 1: shared profiles/attempts/interactions, immutable effective policy/hash, migration 18, Rust/Web fixtures и typed capability admission без fallback |
+| `0.2.22` | 2026-07-22 | shipped | Managed Agent Work Loop stage 2: Node-owned Codex app-server supervisor, live semantic stream, interactions, interrupt/stop, resume descriptors и restart reconciliation |
+| `0.2.23` | 2026-07-22 | shipped | Managed Agent Work Loop stage 3: Core policy preview/admission, durable interaction state machine, ordered projection, actual-state reconnect, recovery audit и metrics |
+| `0.2.24` | 2026-07-22 | shipped | Managed Agent Work Loop stage 4: explicit profile/policy start UX, semantic timeline, typed interaction cards, runtime diagnostics и capability-aware lifecycle |
+| `0.2.25` | 2026-07-22 | shipped | Managed Agent Work Loop stage 5: recovery/acceptance gate, capability-aware Managed default, explicit compatibility isolation и provider environment allowlist |
+| `0.2.26` | 2026-07-22 | current | Managed Agent Work Loop deployment hardening: renewable process MCP lease, canonical workspace enforcement, bounded interrupt/stop, real idle teardown, provider version pinning и complete host acceptance |
 
 ## Current Baseline
 
-`0.2.19` включает baseline `0.2.18`, protocol-v2 baseline `0.2.0`, завершённое Zarya 0.1 Web UI/UX
+`0.2.26` включает baseline `0.2.25`, protocol-v2 baseline `0.2.0`, завершённое Zarya 0.1 Web UI/UX
 alignment и clean-bootstrap four-phase delivery path. Текущая реализация включает
 первый working distributed
-control panel, девятнадцать implementation slices после `0.1.0`, unified audit
+control panel, двадцать шесть implementation slices после `0.1.0`, unified audit
 hardening slice и workspace
 renderer/PTY terminal layer, а также первый deployable self-hosted release path:
+
+- Start Agent выбирает Managed по умолчанию на capable Node, показывает target
+  Node/workspace и effective policy preview; compatibility остаётся явным
+  выбором и требует отдельного unrestricted acknowledgement;
+- Agent surface постоянно показывает execution profile, sandbox/approval
+  policy, policy hash, provider/driver version, current attempt, recovery и
+  last activity; compatibility имеет persistent unsafe warning;
+- semantic timeline различает bounded provider activity, provider approvals и
+  questions. Typed cards используют отдельные Core endpoints, блокируют replay
+  в `resolving` и сохраняются после reload через durable projection;
+- lifecycle controls следуют projected capabilities: managed-only Interrupt не
+  показывается для Exec compatibility, Detach не останавливает provider, Stop
+  сохраняет session history, а Resume показывает policy/recovery context;
+- Managed process MCP credential переиспользуется до refresh window и
+  ротируется через replacement app-server + provider-native resume; первый
+  turn больше не отзывает credential живого процесса; одноразовое имя
+  secret-env и отключённый `shell_snapshot` защищают от cached credentials,
+  а встроенный server не дублирует Core-owned tool approvals;
+- Node канонизирует Managed workspace и immutable policy root перед spawn;
+  interrupt доступен параллельно active socket loop, имеет bounded provider
+  confirmation и TERM/KILL escalation; неизвестный provider callback даёт
+  typed failure и teardown вместо бесконечного зависания;
+- idle expiry записывает system StopRuntime, завершает Node process, отзывает
+  lease и переводит pending interactions в expired; provider version из Node
+  capability закрепляется в effective policy; SIGINT/SIGTERM наблюдаются на
+  всём supervisor loop, поэтому service shutdown не оставляет app-server orphan;
+- host acceptance автоматически проверяет approve, deny, user input,
+  interrupt, MCP, stop/resume, reload и explicit Exec compatibility;
+- Managed composer и Send Turn API имеют explicit `default | plan` mode; Plan
+  прокидывает effective provider model в app-server и включает typed
+  user-input interaction, каждый следующий turn явно восстанавливает Default,
+  а Exec compatibility получает typed rejection;
+
+- Core рассчитывает policy preview до start, атомарно сохраняет выбранный
+  profile, immutable policy/hash, Start command и audit. Explicit Exec
+  compatibility selection получает отдельный unsafe audit record;
+- provider interaction проходит `requested -> resolving -> approved | denied |
+  answered` либо terminal expiry/cancellation/supersession. HTTP acceptance и
+  command intent атомарны, но только provider event завершает interaction и
+  возвращает active turn/runtime в running;
+- reconnect handshake несёт secret-free actual attempt identity, policy hash и
+  state. Core принимает только current generation/attempt, не оживляет stale
+  report и показывает отсутствующий managed process как provider-resumable;
+- Node владеет process-per-attempt Codex app-server v2 supervisor: проверяет
+  immutable policy/hash до запуска, сохраняет socket/process/request ids только
+  in-memory, сериализует один active turn, нормализует bounded deltas/activity,
+  approvals и user input и не выполняет silent Exec fallback;
+- native `turn/interrupt`, scoped process-group stop и opaque thread resume
+  reference сохраняют lifecycle конкретного attempt; после Node restart
+  непроверяемый live descriptor становится explicit `lost/stale`, после чего
+  допускается только отдельный provider-native Resume;
+- deterministic fake app-server regression доказывает два turns в одном live
+  thread, approval/input continuation и stop; существующий Exec compatibility
+  и OpenSandbox Task paths остаются отдельными;
+- shared Managed Agent contracts различают `managed` и `exec_compatibility`,
+  `RuntimeSession` и конкретный `RuntimeAttempt`, approval и user-input
+  interactions; Core сохраняет immutable effective policy JSON/hash, recovery
+  projection и attempt/interaction lifecycle через migration 18;
+- Core допускает managed start только при полном наборе раздельных Node
+  capabilities и возвращает typed unavailable reason без Exec fallback;
+  отсутствие profile выбирает Managed, existing sessions сохраняют stored
+  profile, а Jobs продолжают выбирать `exec_compatibility` явно;
+- provider protocol gate для Managed Agent Work Loop выбирает experimental
+  Codex app-server v2 из `codex-cli 0.144.1` over loopback WebSocket;
+  disposable Rust probe подтверждает два live turns, typed activity,
+  approval/input continuation, interrupt, reconnect/resume, safe/unrestricted
+  policy echo, Uprava-shaped MCP bearer boundary and process recovery;
+- каноническая модель разделяет Core-owned `SessionThread`/`RuntimeSession` и
+  Node-owned process-per-attempt `RuntimeAttempt`; `0.2.25` закрывает stages
+  0–5, ограничивает provider child environment allowlist и добавляет host-only
+  acceptance для Managed default, recovery и explicit compatibility;
+- RuntimeStopped атомарно закрывает current attempt и pending interactions;
+  Managed resume получает MCP lease, scoped к non-terminal Resume command, а
+  SQLite lease/event writes резервируют writer до read snapshot, не оставляя
+  recovery или compatibility runtime без terminal projection;
 
 - Core хранит отдельный `TaskRun` и dispatch-ит его на capability-compatible
   Node без создания interactive session; Node создаёт linked Git worktree,

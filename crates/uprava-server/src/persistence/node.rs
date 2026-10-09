@@ -658,6 +658,27 @@ pub(crate) async fn ensure_session_commandable(
     detail: &SessionDetail,
     command_kind: CommandKind,
 ) -> Result<(), AppError> {
+    if command_kind == CommandKind::ResumeRuntime {
+        let stop_pending: bool = sqlx::query_scalar(
+            r#"
+            select exists(
+                select 1 from commands
+                where runtime_session_id = ?1
+                  and kind = 'StopRuntime'
+                  and state not in ('completed', 'failed', 'expired')
+            )
+            "#,
+        )
+        .bind(detail.session.runtime.runtime_session_id.as_str())
+        .fetch_one(&state.pool)
+        .await?;
+        if stop_pending {
+            return Err(AppError::conflict(
+                "runtime.stop_pending",
+                "Runtime stop must finish before it can be resumed",
+            ));
+        }
+    }
     if command_requires_attached_session(command_kind)
         && detail.session.state == SessionThreadState::Detached
     {
@@ -672,10 +693,11 @@ pub(crate) async fn ensure_session_commandable(
         ensure_placement_startable(&detail.placement)?;
     }
     if command_requires_provider_capability(command_kind) {
-        ensure_node_supports_provider(
+        ensure_node_supports_execution_profile(
             state,
             &detail.placement.node_id,
             &detail.session.runtime.provider,
+            detail.session.runtime.execution_profile,
         )
         .await?;
     }
@@ -701,7 +723,9 @@ pub(crate) fn ensure_runtime_accepts_command(
             runtime.state,
             RuntimeSessionState::Ready | RuntimeSessionState::Running
         ),
-        CommandKind::ResolveApproval => runtime.state == RuntimeSessionState::Blocked,
+        CommandKind::ResolveApproval | CommandKind::SubmitUserInput => {
+            runtime.state == RuntimeSessionState::Blocked
+        }
         CommandKind::InterruptRuntime => matches!(
             runtime.state,
             RuntimeSessionState::Running | RuntimeSessionState::Blocked
@@ -768,7 +792,7 @@ pub(crate) fn ensure_pending_approval(
 pub(crate) fn command_requires_attached_session(command_kind: CommandKind) -> bool {
     matches!(
         command_kind,
-        CommandKind::SendTurn | CommandKind::ResolveApproval
+        CommandKind::SendTurn | CommandKind::ResolveApproval | CommandKind::SubmitUserInput
     )
 }
 
@@ -779,6 +803,7 @@ pub(crate) fn command_requires_provider_capability(command_kind: CommandKind) ->
             | CommandKind::ResumeRuntime
             | CommandKind::SendTurn
             | CommandKind::ResolveApproval
+            | CommandKind::SubmitUserInput
             | CommandKind::RequestDeduction
     )
 }
@@ -820,6 +845,113 @@ pub(crate) async fn ensure_node_supports_provider(
         "node.capability_missing",
         format!("Node does not advertise provider capability `{provider}`"),
     ))
+}
+
+pub(crate) async fn ensure_node_supports_execution_profile(
+    state: &AppState,
+    node_id: &NodeId,
+    provider: &str,
+    profile: AgentExecutionProfile,
+) -> Result<Vec<ProviderRuntimeCapability>, AppError> {
+    if provider != "codex" {
+        if profile == AgentExecutionProfile::Managed {
+            return Err(AppError::bad_request(
+                "runtime.managed_provider_unsupported",
+                format!("Managed execution is not implemented for provider `{provider}`"),
+            ));
+        }
+        ensure_node_supports_provider(state, node_id, provider).await?;
+        return Ok(Vec::new());
+    }
+
+    let required = match profile {
+        AgentExecutionProfile::Managed => {
+            ProviderRuntimeCapability::required_for_managed_codex().to_vec()
+        }
+        AgentExecutionProfile::ExecCompatibility => {
+            vec![ProviderRuntimeCapability::CodexExec]
+        }
+    };
+    let mut unavailable = Vec::new();
+    for capability in &required {
+        if !node_supports_capability(state, node_id, capability.as_str()).await? {
+            unavailable.push(capability.as_str());
+        }
+    }
+    if unavailable.is_empty() {
+        return Ok(required);
+    }
+
+    // Rolling compatibility: pre-foundation Nodes only advertised provider.codex.
+    if profile == AgentExecutionProfile::ExecCompatibility
+        && node_supports_provider(state, node_id, provider).await?
+    {
+        return Ok(required);
+    }
+
+    Err(AppError::bad_request(
+        "runtime.profile_capability_unavailable",
+        format!(
+            "Node cannot admit `{profile:?}` execution; unavailable capabilities: {}",
+            unavailable.join(", ")
+        ),
+    ))
+}
+
+pub(crate) async fn provider_version_for_node(
+    state: &AppState,
+    node_id: &NodeId,
+    provider: &str,
+) -> Result<Option<String>, AppError> {
+    let capability_json: Option<String> = sqlx::query_scalar(
+        "select value_json from node_capabilities where node_id = ?1 and capability_key = ?2",
+    )
+    .bind(node_id.as_str())
+    .bind(format!("provider.{provider}.version"))
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some(capability_json) = capability_json else {
+        return Ok(None);
+    };
+    let capability: CapabilityValue = serde_json::from_str(&capability_json)?;
+    Ok(match capability {
+        CapabilityValue::Extension { name, value } if name == "provider_version" => {
+            value.0.as_str().map(str::to_owned)
+        }
+        _ => None,
+    })
+}
+
+pub(crate) async fn node_supports_capability(
+    state: &AppState,
+    node_id: &NodeId,
+    capability_key: &str,
+) -> Result<bool, AppError> {
+    let capability_json: Option<String> = sqlx::query_scalar(
+        "select value_json from node_capabilities where node_id = ?1 and capability_key = ?2",
+    )
+    .bind(node_id.as_str())
+    .bind(capability_key)
+    .fetch_optional(&state.pool)
+    .await?;
+    if let Some(capability_json) = capability_json {
+        let value = serde_json::from_str::<CapabilityValue>(&capability_json)?;
+        return Ok(capability_is_available(&CapabilitySummary {
+            key: capability_key.to_owned(),
+            value,
+        }));
+    }
+
+    let capabilities_json: String =
+        sqlx::query_scalar("select capabilities_json from nodes where node_id = ?1")
+            .bind(node_id.as_str())
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::not_found("node.not_found", "Node not found"))?;
+    let capabilities = serde_json::from_str::<Vec<CapabilitySummary>>(&capabilities_json)?;
+    Ok(capabilities
+        .iter()
+        .any(|capability| capability.key == capability_key && capability_is_available(capability)))
 }
 
 pub(crate) async fn node_supports_provider(

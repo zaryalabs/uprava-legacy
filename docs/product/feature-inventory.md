@@ -38,7 +38,7 @@
 | F-016 | Cloud product with accounts/projects | Коммерческий cloud-вариант с аккаунтами и проектами. | `docs/development/uprava-notes.md:55` |
 | F-017 | Мультиплатформенность | Продукт должен работать между desktop и mobile. | `README.md`, `docs/development/uprava-notes.md:9`, `docs/development/uprava-notes.md:69` |
 | F-018 | Execution-mode neutral core | Core не должен быть привязан только к task-based cloud-agent flow; persistent, task-based and hybrid режимы должны быть разными execution modes одной системы. | User clarification, 2026-06-15 |
-| F-019 | Hybrid managed session | Живая сессия или orchestration agent может порождать bounded task runs для отдельных подзадач, а затем возвращать результат в общий workflow/session state. | User clarification, 2026-06-15 |
+| F-019 | Future Agent-to-Task delegation | Managed Agent позже может явным tool-вызовом порождать bounded Task Runs, не смешивая live session context с Task isolation, evidence and review contract. Не входит в exit criteria Managed Agent Work Loop. | User clarification, 2026-06-15; reframed 2026-07-22 |
 
 ## 2. Agents
 
@@ -198,7 +198,9 @@
 | F-183 | Autonomous progress metric | Считать, насколько система смогла продвинуться без вмешательства человека. | `docs/development/uprava-notes.md:40` |
 | F-184 | API regression benchmark | Делать большой regression на уровне API, потому что UI тестировать сложнее. | `docs/development/uprava-notes.md:41` |
 | F-185 | Agent mode benchmark | Сравнивать single-shot, dialogue, hierarchical и pipeline режимы агентской работы. | `docs/development/uprava-notes.md:57`, `docs/development/uprava-notes.md:78-81` |
-| F-186 | Execution mode comparison | Сравнивать persistent session, task-based sandbox run и hybrid managed session по review cost, autonomy, latency, trace quality and user control. | User clarification, 2026-06-15 |
+| F-186 | Execution mode comparison | Сравнивать Managed Agent, Agent exec compatibility, task-based sandbox run и sessionless Job Run по review cost, autonomy, latency, trace quality and user control. | User clarification, 2026-06-15; updated 2026-07-22 |
+| F-187 | Managed Agent Work Loop | Сделать provider-native live Codex runtime основным Agent mode: streaming, approvals, questions, interrupt, detach/reattach and resume через semantic protocol, а не встроенный TUI. | User clarification, 2026-07-22 |
+| F-188 | Surface-specific provider policy | Сохранить unrestricted exec для Agent compatibility и externally sandboxed Tasks; Jobs перевести на sessionless sandboxed exec с non-interactive approvals by default. | User clarification, 2026-07-22 |
 
 ## 11. Domains and Expansion
 

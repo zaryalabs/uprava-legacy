@@ -120,6 +120,41 @@ describe("session timeline blocks", () => {
     ]);
   });
 
+  it("maps provider questions and resolutions to semantic interaction blocks", () => {
+    const requested = blockFromEvent(
+      eventWithPayload("provider.interaction.requested", {
+        provider_interaction_id: "interaction-1",
+        runtime_attempt_id: "attempt-1",
+        interaction_kind: "user_input",
+        prompt: "Which target should I use?",
+        expires_at: null,
+      }),
+    );
+    const resolved = blockFromEvent(
+      eventWithPayload("provider.interaction.resolved", {
+        provider_interaction_id: "interaction-1",
+        runtime_attempt_id: "attempt-1",
+        interaction_kind: "user_input",
+        approved: null,
+        answers: ["staging"],
+      }),
+    );
+
+    expect(requested.block.type).toBe("core.provider-interaction");
+    expect(requested.block.primary_ref).toEqual({
+      kind: "provider_interaction",
+      provider_interaction_id: "interaction-1",
+    });
+    expect(requested.block.data).toMatchObject({
+      interactionKind: "user_input",
+      state: "requested",
+    });
+    expect(resolved.block.data).toMatchObject({
+      state: "resolved",
+      answered: true,
+    });
+  });
+
   it("groups runtime bootstrap before the first user message", () => {
     const detail = detailWithApproval();
     const blocks = buildSessionTimelineBlocks({

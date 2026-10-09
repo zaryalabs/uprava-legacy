@@ -281,6 +281,7 @@ async fn create_test_session(state: &Arc<AppState>) -> (NodeId, SessionDetail, s
             project_placement_id: placement.project_placement_id,
             title: Some("Session".to_owned()),
             provider: "codex".to_owned(),
+            execution_profile: Some(AgentExecutionProfile::ExecCompatibility),
             force: false,
         }),
     )

@@ -137,6 +137,9 @@ async fn codex_start_runtime_rejects_symlink_workspace_escape() {
     command.payload = CommandPayload::StartRuntime {
         provider: "codex".to_owned(),
         workspace_path: escaped_workspace.display().to_string(),
+        execution_profile: AgentExecutionProfile::ExecCompatibility,
+        effective_policy: None,
+        effective_policy_hash: None,
     };
     let mut local_state = NodeLocalState::default();
 

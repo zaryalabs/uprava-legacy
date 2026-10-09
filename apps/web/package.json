@@ -1,6 +1,6 @@
 {
   "name": "@uprava/web",
-  "version": "0.2.19",
+  "version": "0.2.26",
   "private": true,
   "type": "module",
   "scripts": {

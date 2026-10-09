@@ -37,8 +37,28 @@ pub(crate) async fn create_session_with_correlation(
     }
     ensure_node_commandable(state, &placement.node_id).await?;
     ensure_placement_startable(&placement)?;
-    ensure_node_supports_provider(state, &placement.node_id, &provider).await?;
+    let profile_was_explicit = request.execution_profile.is_some();
+    let execution_profile = request
+        .execution_profile
+        .unwrap_or(AgentExecutionProfile::Managed);
+    let provider_capabilities = ensure_node_supports_execution_profile(
+        state,
+        &placement.node_id,
+        &provider,
+        execution_profile,
+    )
+    .await?;
     ensure_provider_quota_admission(state, &provider, request.force, "session.start").await?;
+    let provider_version = provider_version_for_node(state, &placement.node_id, &provider).await?;
+    let effective_policy = resolve_effective_runtime_policy(
+        &provider,
+        provider_version,
+        execution_profile,
+        &placement.workspace_path,
+        provider_capabilities,
+    );
+    let effective_policy_hash = effective_policy.policy_hash()?;
+    let effective_policy_json = serde_json::to_string(&effective_policy)?;
     let now = Utc::now();
     let session_thread_id = SessionThreadId::new();
     let runtime_session_id = RuntimeSessionId::new();
@@ -70,15 +90,20 @@ pub(crate) async fn create_session_with_correlation(
         insert into runtime_sessions (
             runtime_session_id, session_thread_id, provider, state,
             resume_supported, provider_resume_ref_json, degraded_reason,
-            last_runtime_step_at, created_at, updated_at
+            last_runtime_step_at, execution_profile, effective_policy_json,
+            effective_policy_hash, recovery_status, created_at, updated_at
         )
-        values (?1, ?2, ?3, 'starting', 1, null, null, ?4, ?4, ?4)
+        values (?1, ?2, ?3, 'starting', 1, null, null, ?4, ?5, ?6, ?7,
+                'not_required', ?4, ?4)
         "#,
     )
     .bind(runtime_session_id.as_str())
     .bind(session_thread_id.as_str())
     .bind(&provider)
     .bind(now)
+    .bind(format_execution_profile(execution_profile))
+    .bind(&effective_policy_json)
+    .bind(effective_policy_hash.as_str())
     .execute(&mut *aggregate_transaction)
     .await?;
     let command = CommandEnvelope {
@@ -98,13 +123,145 @@ pub(crate) async fn create_session_with_correlation(
         payload: CommandPayload::StartRuntime {
             provider: provider.clone(),
             workspace_path: placement.workspace_path,
+            execution_profile,
+            effective_policy: Some(effective_policy),
+            effective_policy_hash: Some(effective_policy_hash.clone()),
         },
     };
     record_command_on_connection(&mut aggregate_transaction, &command).await?;
+    for (kind, outcome, metadata) in [
+        (
+            "runtime.profile.selected",
+            "accepted",
+            json!({
+                "session_thread_id": session_thread_id,
+                "runtime_session_id": runtime_session_id,
+                "profile": format_execution_profile(execution_profile),
+                "explicit": profile_was_explicit,
+            }),
+        ),
+        (
+            "runtime.policy.effective",
+            "accepted",
+            json!({
+                "runtime_session_id": runtime_session_id,
+                "policy_hash": effective_policy_hash,
+                "profile": format_execution_profile(execution_profile),
+            }),
+        ),
+    ] {
+        sqlx::query(
+            "insert into security_audit_events (audit_event_id, kind, node_id, origin, outcome, metadata_json, happened_at) values (?1, ?2, ?3, 'local_user', ?4, ?5, ?6)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(kind)
+        .bind(placement.node_id.as_str())
+        .bind(outcome)
+        .bind(serde_json::to_string(&metadata)?)
+        .bind(now)
+        .execute(&mut *aggregate_transaction)
+        .await?;
+    }
+    if profile_was_explicit && execution_profile == AgentExecutionProfile::ExecCompatibility {
+        sqlx::query(
+            "insert into security_audit_events (audit_event_id, kind, node_id, origin, outcome, metadata_json, happened_at) values (?1, 'runtime.policy.unsafe_override', ?2, 'local_user', 'accepted', ?3, ?4)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(placement.node_id.as_str())
+        .bind(serde_json::to_string(&json!({
+            "runtime_session_id": runtime_session_id,
+            "reason": "explicit_exec_compatibility_selection",
+        }))?)
+        .bind(now)
+        .execute(&mut *aggregate_transaction)
+        .await?;
+    }
     aggregate_transaction.commit().await?;
     dispatch_pending_commands(state, command.target.node_id()).await?;
 
     load_session_detail(state, &session_thread_id).await
+}
+
+pub(crate) async fn preview_session_policy_route(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<PreviewSessionPolicyRequest>,
+) -> Result<Json<SessionPolicyPreview>, AppError> {
+    let placement = load_placement(&state, &request.project_placement_id).await?;
+    let provider = request.provider.trim();
+    if provider.is_empty() {
+        return Err(AppError::bad_request(
+            "validation.provider_required",
+            "Provider is required",
+        ));
+    }
+    ensure_node_commandable(&state, &placement.node_id).await?;
+    ensure_placement_startable(&placement)?;
+    let capabilities = ensure_node_supports_execution_profile(
+        &state,
+        &placement.node_id,
+        provider,
+        request.execution_profile,
+    )
+    .await?;
+    let provider_version = provider_version_for_node(&state, &placement.node_id, provider).await?;
+    let effective_policy = resolve_effective_runtime_policy(
+        provider,
+        provider_version,
+        request.execution_profile,
+        &placement.workspace_path,
+        capabilities,
+    );
+    let effective_policy_hash = effective_policy.policy_hash()?;
+    Ok(Json(SessionPolicyPreview {
+        project_placement_id: request.project_placement_id,
+        node_id: placement.node_id,
+        effective_policy,
+        effective_policy_hash,
+    }))
+}
+
+pub(crate) fn resolve_effective_runtime_policy(
+    provider: &str,
+    provider_version: Option<String>,
+    execution_profile: AgentExecutionProfile,
+    workspace_root: &str,
+    provider_capabilities: Vec<ProviderRuntimeCapability>,
+) -> EffectiveRuntimePolicy {
+    let (sandbox_mode, approval_mode, network_posture) = match execution_profile {
+        AgentExecutionProfile::Managed => (
+            ProviderSandboxMode::WorkspaceWrite,
+            ProviderApprovalMode::Untrusted,
+            RuntimeNetworkPosture::Unsupported,
+        ),
+        AgentExecutionProfile::ExecCompatibility => (
+            ProviderSandboxMode::DangerFullAccess,
+            ProviderApprovalMode::Never,
+            RuntimeNetworkPosture::ProviderDefault,
+        ),
+    };
+    EffectiveRuntimePolicy {
+        contract_version: 1,
+        execution_profile,
+        provider: provider.to_owned(),
+        provider_version,
+        provider_capabilities,
+        sandbox_mode,
+        approval_mode,
+        workspace_root: workspace_root.to_owned(),
+        additional_writable_paths: Vec::new(),
+        network_posture,
+        tool_exposure: RuntimeToolExposureSummary {
+            server_count: 0,
+            tool_count: 0,
+            server_names: Vec::new(),
+        },
+        credential_profile_ref: None,
+        unsafe_override: None,
+        capability_metadata: BTreeMap::from([(
+            "policy_source".to_owned(),
+            "core.foundation.v1".to_owned(),
+        )]),
+    }
 }
 
 pub(crate) async fn session_detail(
@@ -338,7 +495,14 @@ pub(crate) async fn send_turn_with_correlation(
     request: SendTurnRequest,
     correlation_id: CorrelationId,
 ) -> Result<CommandAcceptedResponse, AppError> {
-    submit_turn_with_correlation(state, session_id, request.content, correlation_id).await
+    submit_turn_with_correlation(
+        state,
+        session_id,
+        request.content,
+        request.collaboration_mode,
+        correlation_id,
+    )
+    .await
 }
 
 pub(crate) async fn create_deduction_route(
@@ -702,6 +866,28 @@ pub(crate) async fn deduction_scope_belongs_to_session(
     match scope_ref {
         UpravaRef::Session { session_thread_id } => Ok(session_thread_id == session_id),
         UpravaRef::Runtime { runtime_session_id } => Ok(runtime_session_id == runtime_id),
+        UpravaRef::RuntimeAttempt { runtime_attempt_id } => {
+            let count: i64 = sqlx::query_scalar(
+                "select count(*) from runtime_attempts where runtime_attempt_id = ?1 and runtime_session_id = ?2",
+            )
+            .bind(runtime_attempt_id.as_str())
+            .bind(runtime_id.as_str())
+            .fetch_one(&state.pool)
+            .await?;
+            Ok(count > 0)
+        }
+        UpravaRef::ProviderInteraction {
+            provider_interaction_id,
+        } => {
+            let count: i64 = sqlx::query_scalar(
+                "select count(*) from provider_interactions where provider_interaction_id = ?1 and session_thread_id = ?2",
+            )
+            .bind(provider_interaction_id.as_str())
+            .bind(session_id.as_str())
+            .fetch_one(&state.pool)
+            .await?;
+            Ok(count > 0)
+        }
         UpravaRef::Placement {
             placement_id: candidate,
         }
@@ -1018,12 +1204,14 @@ pub(crate) async fn submit_turn_with_correlation(
     state: &AppState,
     session_id: SessionThreadId,
     content: String,
+    collaboration_mode: Option<String>,
     correlation_id: CorrelationId,
 ) -> Result<CommandAcceptedResponse, AppError> {
     submit_turn_for_actor(
         state,
         session_id,
         content,
+        collaboration_mode,
         correlation_id,
         ActorRef::local_user(),
     )
@@ -1034,6 +1222,7 @@ pub(crate) async fn submit_turn_for_actor(
     state: &AppState,
     session_id: SessionThreadId,
     content: String,
+    collaboration_mode: Option<String>,
     correlation_id: CorrelationId,
     actor_ref: ActorRef,
 ) -> Result<CommandAcceptedResponse, AppError> {
@@ -1043,8 +1232,26 @@ pub(crate) async fn submit_turn_for_actor(
             "Turn content cannot be empty",
         ));
     }
+    let collaboration_mode = match collaboration_mode.as_deref() {
+        None | Some("default") => None,
+        Some("plan") => Some("plan".to_owned()),
+        Some(_) => {
+            return Err(AppError::bad_request(
+                "validation.collaboration_mode_invalid",
+                "Collaboration mode must be `default` or `plan`",
+            ))
+        }
+    };
 
     let detail = load_session_detail(state, &session_id).await?;
+    if collaboration_mode.is_some()
+        && detail.session.runtime.execution_profile != AgentExecutionProfile::Managed
+    {
+        return Err(AppError::bad_request(
+            "validation.collaboration_mode_unsupported",
+            "Plan collaboration mode requires a managed runtime",
+        ));
+    }
     ensure_session_commandable(state, &detail, CommandKind::SendTurn).await?;
     let now = Utc::now();
     let command_id = CommandId::new();
@@ -1069,6 +1276,7 @@ pub(crate) async fn submit_turn_for_actor(
         payload: CommandPayload::SendTurn {
             content: content.clone(),
             turn_id: turn_id.clone(),
+            collaboration_mode,
         },
     };
     record_turn_submission(

@@ -5,6 +5,12 @@ use super::*;
 pub(crate) fn scope_key(scope_ref: &ScopeRef) -> String {
     match scope_ref {
         ScopeRef::Runtime { runtime_session_id } => format!("runtime:{}", runtime_session_id),
+        ScopeRef::RuntimeAttempt { runtime_attempt_id } => {
+            format!("runtime_attempt:{runtime_attempt_id}")
+        }
+        ScopeRef::ProviderInteraction {
+            provider_interaction_id,
+        } => format!("provider_interaction:{provider_interaction_id}"),
         ScopeRef::Session { session_thread_id } => format!("session:{}", session_thread_id),
         ScopeRef::Node { node_id } => format!("node:{}", node_id),
         ScopeRef::Placement {
@@ -450,6 +456,70 @@ pub(crate) fn format_runtime_state(value: RuntimeSessionState) -> &'static str {
     }
 }
 
+pub(crate) fn parse_execution_profile(value: &str) -> AgentExecutionProfile {
+    match value {
+        "managed" => AgentExecutionProfile::Managed,
+        _ => AgentExecutionProfile::ExecCompatibility,
+    }
+}
+
+pub(crate) const fn format_execution_profile(value: AgentExecutionProfile) -> &'static str {
+    match value {
+        AgentExecutionProfile::Managed => "managed",
+        AgentExecutionProfile::ExecCompatibility => "exec_compatibility",
+    }
+}
+
+pub(crate) fn parse_runtime_attempt_state(value: &str) -> RuntimeAttemptState {
+    match value {
+        "starting" => RuntimeAttemptState::Starting,
+        "ready" => RuntimeAttemptState::Ready,
+        "disconnected" => RuntimeAttemptState::Disconnected,
+        "reconnecting" => RuntimeAttemptState::Reconnecting,
+        "recovered" => RuntimeAttemptState::Recovered,
+        "stopping" => RuntimeAttemptState::Stopping,
+        "stopped" => RuntimeAttemptState::Stopped,
+        "lost" => RuntimeAttemptState::Lost,
+        _ => RuntimeAttemptState::Failed,
+    }
+}
+
+pub(crate) const fn format_runtime_attempt_state(value: RuntimeAttemptState) -> &'static str {
+    match value {
+        RuntimeAttemptState::Starting => "starting",
+        RuntimeAttemptState::Ready => "ready",
+        RuntimeAttemptState::Disconnected => "disconnected",
+        RuntimeAttemptState::Reconnecting => "reconnecting",
+        RuntimeAttemptState::Recovered => "recovered",
+        RuntimeAttemptState::Stopping => "stopping",
+        RuntimeAttemptState::Stopped => "stopped",
+        RuntimeAttemptState::Failed => "failed",
+        RuntimeAttemptState::Lost => "lost",
+    }
+}
+
+pub(crate) const fn format_provider_interaction_kind(
+    value: ProviderInteractionKind,
+) -> &'static str {
+    match value {
+        ProviderInteractionKind::Approval => "approval",
+        ProviderInteractionKind::UserInput => "user_input",
+    }
+}
+
+pub(crate) fn parse_runtime_recovery_status(value: &str) -> RuntimeRecoveryStatus {
+    match value {
+        "live" => RuntimeRecoveryStatus::Live,
+        "reconnecting" => RuntimeRecoveryStatus::Reconnecting,
+        "recovered" => RuntimeRecoveryStatus::Recovered,
+        "provider_resumable" => RuntimeRecoveryStatus::ProviderResumable,
+        "degraded" => RuntimeRecoveryStatus::Degraded,
+        "lost" => RuntimeRecoveryStatus::Lost,
+        "failed" => RuntimeRecoveryStatus::Failed,
+        _ => RuntimeRecoveryStatus::NotRequired,
+    }
+}
+
 pub(crate) fn format_turn_state(value: TurnState) -> &'static str {
     match value {
         TurnState::Created => "created",
@@ -487,6 +557,7 @@ pub(crate) fn parse_command_kind(value: &str) -> CommandKind {
         "ResumeRuntime" => CommandKind::ResumeRuntime,
         "SendTurn" => CommandKind::SendTurn,
         "ResolveApproval" => CommandKind::ResolveApproval,
+        "SubmitUserInput" => CommandKind::SubmitUserInput,
         "InterruptRuntime" => CommandKind::InterruptRuntime,
         "StopRuntime" => CommandKind::StopRuntime,
         "ValidateWorkspace" => CommandKind::ValidateWorkspace,

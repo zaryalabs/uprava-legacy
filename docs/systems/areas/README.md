@@ -33,7 +33,9 @@ Uprava.
 - dynamic UI: как агент может вернуть форму, dashboard, graph, embedded view или другой интерактивный блок;
 - visual rendering and artifact semantics: где и как Uprava рендерит visual objects, что является source-of-truth, и когда view становится artifact;
 - go to source / causality navigation: как пользователь переходит от результата, diff, ошибки или artifact к источнику, evidence and причине;
-- run mode: как Uprava запускает агентскую работу через Persistent Runtime, stateless/ephemeral runtime или hybrid strategy, и как поверх этого различаются interactive session and bounded task contracts;
+- run mode: как Uprava запускает Agent через provider-native managed runtime
+  или exec/resume compatibility path, а Tasks и Jobs — через отдельные one-shot
+  contracts с собственной isolation and approval policy;
 - human-agent dual interface: как человек и агент работают с одной видимой моделью, где agent является first-class citizen.
 
 Внутри каждой ключевой механики может быть много технических решений, но сначала нужно выбрать саму модель.
@@ -98,7 +100,9 @@ docs/systems/areas/013-task-based-sandbox-runtime.md
 - Модульность является архитектурным принципом, а не маркетплейсом поверх монолита.
 - Visual artifacts и dynamic UI - способ понимания и управления работой, а не декоративный слой.
 - Интеграции должны быть visible and traceable: не скрытые API calls внутри текста агента.
-- Persistent, stateless/ephemeral and hybrid strategies должны быть runtime strategies одного Run Mode, а не разными продуктами.
+- Provider-native managed, stateless/ephemeral, externally sandboxed and
+  sessionless strategies должны быть явными runtime profiles одного Run Mode,
+  а не скрытыми вариациями общей session.
 - Distributed Runtime Coordination должен быть общим dispatch/resource-awareness слоем для interactive sessions, future task runs and sandboxed runtimes.
 - Human UI и agent-readable UI должны развиваться вместе.
 - Local development and UI verification являются частью проектирования системы: Docker
@@ -113,7 +117,7 @@ docs/systems/areas/013-task-based-sandbox-runtime.md
 | ID | Механика | Ключевые вопросы механики | Ожидаемый результат |
 | --- | --- | --- | --- |
 | A-001 | Distributed architecture | Как именно реализуем distributed модель? Что является Core/control plane, что остается за Node Daemon/data plane, как клиенты работают через Core, где проходят границы host/node/workspace/session? | Рабочая позиция по Core / Node Daemon / clients модели, deployment profiles and responsibility boundaries. |
-| A-002 | Run Mode | Что такое Run Mode как единая механика запуска агентской работы? Как устроены Persistent Runtime, stateless/ephemeral runtime and hybrid strategy? Как поверх runtime strategy различаются interactive session and bounded task contracts? Где границы между project, workspace, node, thread, turn, run and agent process? | Концепция Run Mode для V01 и дальше: Persistent Runtime first, managed process lifetime, lifecycle, visible surface, review points and constraints for future stateless/sandboxed strategies. |
+| A-002 | Run Mode | Как устроены provider-native Managed Agent Work Loop, явный exec/resume compatibility mode и отдельные one-shot contracts Tasks/Jobs? Где проходят execution policy, session, isolation and lifecycle boundaries? | Managed Agent как целевой основной режим; compatibility exec как явный fallback; Tasks и Jobs со своими provider policy, trace и lifetime contracts. |
 | A-003 | Distributed Runtime Coordination | Как Core координирует runtime work между session thread, runtime session, workspace placement and Node? Как dispatch-ятся commands, как упорядочиваются events, как UI видит node/workspace tree, stale/offline, resource warning badges and overrides? Как git repo/branch signals подсвечивают возможные конфликты без lock-системы? | Рабочая модель coordination layer для V01: Nodes -> Projects/Workspaces tree, command proxy, idempotency, event ordering, resource signals, warning badges, override events and reuse by future task/sandbox runtimes. |
 | A-004 | Modular UI and work surface | Что значит модульный UI для Uprava? Это Notion-like blocks, IDE/workbench panels, Obsidian-like navigation, plugin-rendered surfaces или гибрид? Где проходят границы pages, panels, blocks, artifacts, integration surfaces and extension points? | Модель рабочей поверхности и Plugin Registry: VS Code/Obsidian-like packages, manifests, Extension Host, activation/context keys, themes, typed contributions, trust/runtime levels and constraints for React/Vite UI. |
 | A-005 | Dynamic UI from agents | Как агент должен возвращать форму, dashboard, chart, graph, embedded tool или custom block? Как исполнять generated React, не отдавая ему main workbench tree? | Plugin-first концепция dynamic UI: opt-in bundled Generated React plugin, sandboxed artifact runtime, Uprava UI SDK, layout/action contracts, safe fallback и путь к внешним plugins без privileged React path. |

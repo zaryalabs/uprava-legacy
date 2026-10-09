@@ -131,8 +131,17 @@ test("renders warning badges and structured session blocks from snapshots", asyn
   await expect(
     page.getByRole("img", { name: "Attention: Dirty workspace" }),
   ).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Agent" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Start Codex" })).toBeEnabled();
+  await expect(
+    page.getByRole("heading", { name: "Agent", exact: true }),
+  ).toBeVisible();
+  const startCompatibility = page.getByRole("button", {
+    name: "Start Exec compatibility",
+  });
+  await expect(startCompatibility).toBeDisabled();
+  await page
+    .getByRole("checkbox", { name: /I understand this mode is unrestricted/ })
+    .check();
+  await expect(startCompatibility).toBeEnabled();
   await expect(page.getByRole("link", { name: /Fix issue/ })).toHaveAttribute(
     "aria-current",
     "page",
@@ -317,6 +326,126 @@ test("keeps Jobs scoped to the workspace through create, detail, and run", async
   expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
 });
 
+test("starts Managed intentionally and restores a blocked provider question after reload", async ({
+  page,
+}) => {
+  const managedRuntime = {
+    ...runtime,
+    execution_profile: "managed",
+    effective_policy: effectivePolicy("managed"),
+    effective_policy_hash: "managed-policy-hash",
+    recovery_status: "live",
+    current_attempt: {
+      runtime_attempt_id: "attempt-1",
+      state: "ready",
+      started_at: "2026-07-22T10:00:00Z",
+      ready_at: "2026-07-22T10:00:01Z",
+      stopped_at: null,
+      start_reason: "user_start",
+      stop_reason: null,
+      recovery_reason: null,
+    },
+  };
+  const providerQuestion = {
+    provider_interaction_id: "interaction-question-1",
+    runtime_attempt_id: "attempt-1",
+    kind: "user_input",
+    state: "requested",
+    prompt: "Which deployment target should I inspect?",
+    requested_at: "2026-07-22T10:01:00Z",
+    resolved_at: null,
+  };
+  const managedDetail = {
+    ...sessionDetail,
+    session: { ...session, runtime: managedRuntime },
+    pending_interactions: [providerQuestion],
+    events: [
+      ...sessionDetail.events,
+      {
+        ...messageEvent,
+        event_id: "event-provider-question",
+        seq: 4,
+        kind: "provider.interaction.requested",
+        happened_at: "2026-07-22T10:01:00Z",
+        payload: {
+          type: "provider_interaction_requested",
+          provider_interaction_id: "interaction-question-1",
+          runtime_attempt_id: "attempt-1",
+          interaction_kind: "user_input",
+          prompt: "Which deployment target should I inspect?",
+          expires_at: null,
+        },
+      },
+    ],
+  };
+  const managedInventory = {
+    ...inventory,
+    nodes: [
+      {
+        ...inventory.nodes[0],
+        presence: "reachable",
+        capabilities: [
+          ...inventory.nodes[0].capabilities,
+          providerCapability("provider.codex.exec", "exec_compatibility"),
+          providerCapability("provider.codex.managed", "managed"),
+          providerCapability("provider.codex.managed.approval", "managed"),
+          providerCapability("provider.codex.managed.interrupt", "managed"),
+          providerCapability("provider.codex.managed.resume", "managed"),
+        ],
+      },
+    ],
+    sessions: [{ ...session, runtime: managedRuntime }],
+  };
+  const core = await mockCoreApi(page, {
+    inventory: managedInventory,
+    sessionDetail: managedDetail,
+    agentProjection: {
+      ...agentProjection,
+      runtime_summary: managedRuntime,
+      available_commands: [
+        "session.sendTurn",
+        "session.detach",
+        "runtime.interrupt",
+        "runtime.stop",
+        "approval.resolve",
+        "providerInteraction.submitInput",
+      ],
+    },
+  });
+
+  await page.goto("/workspaces/placement-1/agent/session-1");
+  await page.getByRole("radio", { name: /Managed/ }).check();
+  await expect(page.getByText("workspace-write").first()).toBeVisible();
+  await page.getByRole("button", { name: "Start Managed" }).click();
+  await expect
+    .poll(() => core.createdSessionRequest)
+    .toMatchObject({
+      project_placement_id: "placement-1",
+      provider: "codex",
+      execution_profile: "managed",
+    });
+
+  await expect(page.getByText("Provider question").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Interrupt" })).toBeEnabled();
+  await page.getByRole("textbox", { name: "Your answer" }).fill("staging");
+  await page.getByRole("button", { name: "Submit answer" }).click();
+  await expect
+    .poll(() => core.providerInputRequest)
+    .toEqual({
+      answers: ["staging"],
+    });
+
+  await page.reload();
+  await expect(
+    page.getByText("Which deployment target should I inspect?").first(),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Assistant reply", { selector: "p" }).first(),
+  ).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await horizontalOverflow(page)).toBeLessThanOrEqual(1);
+});
+
 test("matches stable Zarya sheets and keeps the mobile session usable", async ({
   page,
 }) => {
@@ -488,7 +617,17 @@ test("supports the shell and composer keyboard path", async ({ page }) => {
   await expect(page.getByText("Draft not sent")).toBeVisible();
 });
 
-async function mockCoreApi(page: import("@playwright/test").Page) {
+async function mockCoreApi(
+  page: import("@playwright/test").Page,
+  overrides: {
+    inventory?: unknown;
+    sessionDetail?: unknown;
+    agentProjection?: unknown;
+  } = {},
+) {
+  const servedInventory = overrides.inventory ?? inventory;
+  const servedSessionDetail = overrides.sessionDetail ?? sessionDetail;
+  const servedAgentProjection = overrides.agentProjection ?? agentProjection;
   const state = {
     validationAttempts: 0,
     warningAcknowledged: false,
@@ -497,13 +636,15 @@ async function mockCoreApi(page: import("@playwright/test").Page) {
     jobsRequests: 0,
     createdJobRequest: null as Record<string, unknown> | null,
     pluginEnabled: false,
+    createdSessionRequest: null as Record<string, unknown> | null,
+    providerInputRequest: null as Record<string, unknown> | null,
   };
   await installMockWebSocket(page);
   await mockPublicShellApi(page);
   await page.route("**/api/v1/inventory", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      body: json(inventory),
+      body: json(servedInventory),
     });
   });
   await page.route("**/api/v1/node-enrollments", async (route) => {
@@ -539,6 +680,33 @@ async function mockCoreApi(page: import("@playwright/test").Page) {
       });
     },
   );
+  await page.route("**/api/v1/sessions/policy-preview", async (route) => {
+    const request = route.request().postDataJSON() as {
+      execution_profile: "managed" | "exec_compatibility";
+    };
+    const managed = request.execution_profile === "managed";
+    await route.fulfill({
+      contentType: "application/json",
+      body: json({
+        project_placement_id: "placement-1",
+        node_id: "node-1",
+        effective_policy: effectivePolicy(request.execution_profile),
+        effective_policy_hash: managed
+          ? "managed-policy-hash"
+          : "exec-policy-hash",
+      }),
+    });
+  });
+  await page.route("**/api/v1/sessions", async (route) => {
+    state.createdSessionRequest = route.request().postDataJSON() as Record<
+      string,
+      unknown
+    >;
+    await route.fulfill({
+      contentType: "application/json",
+      body: json(servedSessionDetail),
+    });
+  });
   await page.route(
     "**/api/v1/plugins/uprava.theme-dark/disable",
     async (route) => {
@@ -715,7 +883,7 @@ async function mockCoreApi(page: import("@playwright/test").Page) {
     async (route) => {
       await route.fulfill({
         contentType: "application/json",
-        body: json(agentProjection),
+        body: json(servedAgentProjection),
       });
     },
   );
@@ -725,6 +893,19 @@ async function mockCoreApi(page: import("@playwright/test").Page) {
       body: "",
     });
   });
+  await page.route(
+    "**/api/v1/sessions/session-1/provider-interactions/*/input",
+    async (route) => {
+      state.providerInputRequest = route.request().postDataJSON() as Record<
+        string,
+        unknown
+      >;
+      await route.fulfill({
+        contentType: "application/json",
+        body: json({ command_id: "command-provider-input", session: null }),
+      });
+    },
+  );
   await page.route(
     "**/api/v1/sessions/session-1/warnings/dirty_workspace/acknowledge",
     async (route) => {
@@ -741,10 +922,57 @@ async function mockCoreApi(page: import("@playwright/test").Page) {
   await page.route("**/api/v1/sessions/session-1", async (route) => {
     await route.fulfill({
       contentType: "application/json",
-      body: json(sessionDetail),
+      body: json(servedSessionDetail),
     });
   });
   return state;
+}
+
+function effectivePolicy(executionProfile: "managed" | "exec_compatibility") {
+  const managed = executionProfile === "managed";
+  return {
+    contract_version: 1,
+    execution_profile: executionProfile,
+    provider: "codex",
+    provider_version: "0.144.1",
+    provider_capabilities: managed
+      ? [
+          "provider.codex.managed",
+          "provider.codex.managed.approval",
+          "provider.codex.managed.interrupt",
+          "provider.codex.managed.resume",
+        ]
+      : ["provider.codex.exec"],
+    sandbox_mode: managed ? "workspace-write" : "danger-full-access",
+    approval_mode: managed ? "untrusted" : "never",
+    workspace_root: "/workspace/uprava",
+    additional_writable_paths: [],
+    network_posture: managed ? "restricted" : "provider_default",
+    tool_exposure: { server_count: 1, tool_count: 4, server_names: ["uprava"] },
+    credential_profile_ref: null,
+    unsafe_override: managed
+      ? null
+      : {
+          actor: { kind: "local_user" },
+          reason: "exec_compatibility",
+          expires_at: "2026-07-23T00:00:00Z",
+        },
+    capability_metadata: { transport: managed ? "app-server-v2" : "exec" },
+  };
+}
+
+function providerCapability(key: string, mode: string) {
+  return {
+    key,
+    value: {
+      kind: "provider",
+      available: true,
+      configured: true,
+      mode,
+      timeout_seconds: 120,
+      unavailable_reason: null,
+    },
+  };
 }
 
 function mockPluginInstallation(enabled: boolean) {

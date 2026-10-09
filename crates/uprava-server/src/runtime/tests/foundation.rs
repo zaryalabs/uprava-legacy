@@ -253,7 +253,9 @@ async fn migration_creates_baseline_schema_from_empty_database() {
                   'tool_calls',
                   'tool_call_events',
                   'session_tool_snapshots',
-                  'mcp_access_leases'
+                  'mcp_access_leases',
+                  'runtime_attempts',
+                  'provider_interactions'
               )
             "#,
     )
@@ -261,7 +263,7 @@ async fn migration_creates_baseline_schema_from_empty_database() {
     .await
     .expect("baseline tables count loads");
 
-    assert_eq!(table_count, 34);
+    assert_eq!(table_count, 36);
 
     let applied_versions: Vec<i64> =
         sqlx::query_scalar("select version from schema_migrations order by version")
@@ -270,7 +272,7 @@ async fn migration_creates_baseline_schema_from_empty_database() {
             .expect("migration versions load");
     assert_eq!(
         applied_versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
     );
 
     let metadata: (String, i64) =
@@ -296,7 +298,7 @@ async fn migration_runner_is_idempotent_and_does_not_duplicate_versions() {
         .fetch_one(&state.pool)
         .await
         .expect("migration count loads");
-    assert_eq!(migration_count, 17);
+    assert_eq!(migration_count, 19);
 }
 
 #[tokio::test]
@@ -346,8 +348,74 @@ async fn migration_upgrades_the_0_2_10_numbered_baseline() {
     .await
     .expect("tooling tables count loads");
 
-    assert_eq!(latest_version, 17);
+    assert_eq!(latest_version, 19);
     assert_eq!(tooling_table_count, 3);
+}
+
+#[tokio::test]
+async fn migration_18_keeps_existing_sessions_in_exec_compatibility() {
+    let pool = memory_pool().await;
+    sqlx::query(
+        "create table schema_migrations (version integer primary key, checksum text not null, applied_at text not null)",
+    )
+    .execute(&pool)
+    .await
+    .expect("migration history table creates");
+    for migration in MIGRATIONS
+        .iter()
+        .filter(|migration| migration.version <= 17)
+    {
+        for statement in migration.statements {
+            if let Err(error) = sqlx::query(statement).execute(&pool).await {
+                assert!(
+                    migration.ignore_duplicate_columns && is_duplicate_column_error(&error),
+                    "migration {} failed: {error}",
+                    migration.version
+                );
+            }
+        }
+        sqlx::query(
+            "insert into schema_migrations (version, checksum, applied_at) values (?1, ?2, ?3)",
+        )
+        .bind(migration.version)
+        .bind(migration.checksum())
+        .bind(Utc::now())
+        .execute(&pool)
+        .await
+        .expect("migration history records");
+    }
+    let now = Utc::now();
+    sqlx::query("insert into nodes (node_id, display_name, presence, sleep_hint, daemon_version, active_runtime_count, capabilities_json, diagnostics, created_at, updated_at) values ('node-old', 'Old node', 'reachable', 'awake', '0.2.20', 0, '[]', '', ?1, ?1)")
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("old node inserts");
+    sqlx::query("insert into project_placements (project_placement_id, node_id, display_name, workspace_path, state, resource_badges_json, created_at, updated_at) values ('placement-old', 'node-old', 'Old workspace', '/tmp/old', 'validated', '[]', ?1, ?1)")
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("old placement inserts");
+    sqlx::query("insert into session_threads (session_thread_id, project_placement_id, runtime_session_id, title, state, provider, created_at, updated_at) values ('session-old', 'placement-old', 'runtime-old', 'Old session', 'active', 'codex', ?1, ?1)")
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("old session inserts");
+    sqlx::query("insert into runtime_sessions (runtime_session_id, session_thread_id, provider, state, resume_supported, created_at, updated_at) values ('runtime-old', 'session-old', 'codex', 'ready', 1, ?1, ?1)")
+        .bind(now)
+        .execute(&pool)
+        .await
+        .expect("old runtime inserts");
+
+    let state = AppState::build_uninitialized(test_config(86_400), pool);
+    state.migrate().await.expect("0.2.20 state upgrades");
+    let profile: String = sqlx::query_scalar(
+        "select execution_profile from runtime_sessions where runtime_session_id = 'runtime-old'",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .expect("execution profile loads");
+
+    assert_eq!(profile, "exec_compatibility");
 }
 
 #[tokio::test]
@@ -561,7 +629,7 @@ async fn migration_concurrent_file_backed_starts_share_one_numbered_history() {
         .fetch_one(&pool)
         .await
         .expect("migration count loads");
-    assert_eq!(count, 17);
+    assert_eq!(count, 19);
     drop(first_state);
     drop(second_state);
     pool.close().await;

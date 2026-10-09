@@ -263,7 +263,10 @@ pub(crate) fn turn_state_for_event(event: &EventEnvelope) -> Option<TurnState> {
         EventKind::TurnStarted => Some(TurnState::Running),
         EventKind::TurnCompleted => Some(TurnState::Completed),
         EventKind::TurnInterrupted => Some(TurnState::Interrupted),
-        EventKind::ApprovalRequested => Some(TurnState::BlockedOnApproval),
+        EventKind::ApprovalRequested | EventKind::ProviderInteractionRequested => {
+            Some(TurnState::BlockedOnApproval)
+        }
+        EventKind::ProviderInteractionResolved => Some(TurnState::Running),
         EventKind::RuntimeError => Some(TurnState::Failed),
         _ => None,
     }

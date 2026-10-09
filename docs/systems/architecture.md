@@ -154,9 +154,14 @@ AI-agent workload, который запускается через Node Daemon 
 
 AI Agent может работать в разных execution modes:
 
-- persistent agent session;
+- provider-native managed Agent session;
+- Agent exec/resume compatibility session;
 - task-based sandbox run;
-- hybrid managed session.
+- sessionless one-shot Job Run.
+
+Опциональная будущая композиция позволяет managed Agent запускать bounded
+`TaskRun`, но она не является отдельным основным режимом и не определяет
+контракт живой Agent surface.
 
 ## Почему Core Backend нужен
 
@@ -193,7 +198,8 @@ Core дает этот endpoint и позволяет:
 
 ### Workflow state
 
-Task-based режим, hybrid mode, CI callbacks and long-running work требуют долговечного состояния:
+Task-based режим, future Agent-to-Task delegation, CI callbacks and long-running
+work требуют долговечного состояния:
 
 - что было запущено;
 - где работа остановилась;
@@ -557,7 +563,9 @@ workflow hooks
 - file access;
 - terminal/PTY;
 - process lifecycle;
-- persistent agent sessions;
+- provider-native managed Agent sessions;
+- Agent exec/resume compatibility executions;
+- sessionless Job provider executions;
 - task-based sandbox runs;
 - sandbox/microVM integration;
 - local tool execution;
@@ -566,6 +574,36 @@ workflow hooks
 - local resource limits;
 - local secret/env access;
 - applying patches and file changes.
+
+Provider protocol gate `0.2.20` уточняет managed boundary. Node запускает один
+loopback-only Codex app-server process на `RuntimeAttempt`, владеет endpoint,
+live request correlation, cancellation, process group and provider secrets и
+нормализует ordered events до отправки в Core. Core хранит `SessionThread`,
+`RuntimeSession`, immutable effective policy and bounded opaque provider resume
+reference, но не process/socket/request ids. Потеря managed process создаёт
+новый attempt и explicit provider resume or typed degraded recovery; она
+никогда не переключает runtime на Exec compatibility молча.
+
+Foundation `0.2.21` материализует эту границу в shared Rust/Web contracts и
+Core SQLite migration 18. Execution profile, policy snapshot/hash,
+RuntimeAttempt identity, recovery и pending provider interactions входят в
+session read model; capability admission остаётся Core-owned. До появления
+Node-managed driver baseline `0.2.22` реализует process-per-attempt supervisor,
+policy/hash gate, typed provider interactions, native interrupt/stop, bounded
+event normalization и explicit lost/stale reconciliation после Node restart.
+Managed capabilities публикуются при доступном Codex binary с распознанной
+совместимой версией. Core orchestration baseline `0.2.23` добавляет единый policy
+preview/admission resolver, атомарный interaction decision intent,
+provider-event confirmation и attempt-aware actual-state reconciliation. Stale
+Node report не может воскресить superseded attempt, а отсутствие live managed
+process даёт explicit provider-resumable projection. Web baseline `0.2.24`
+добавляет явный profile/policy start contract, semantic activity and interaction
+cards, persistent runtime diagnostics и capability-aware lifecycle. Closure
+baseline `0.2.26` переводит новые Agent sessions на Managed default при
+подтверждённых Node capabilities; отсутствующий profile на incapable Node
+получает typed rejection без Exec fallback. Stored profiles не мигрируют,
+internal Jobs остаются на явном Exec compatibility path, а Task Run contract
+не меняется.
 
 ### Client отвечает за
 

@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) const UPRAVA_MCP_TOKEN_ENV: &str = "UPRAVA_MCP_ACCESS_TOKEN";
+pub(crate) const UPRAVA_MCP_TOKEN_ENV_PREFIX: &str = "UPRAVA_MCP_ACCESS_TOKEN_";
 
 #[derive(Debug, Clone)]
 pub(crate) enum RuntimeManager {
@@ -17,40 +17,6 @@ impl RuntimeManager {
             other => Self::Unsupported(UnsupportedProviderAdapter {
                 provider_key: other.to_owned(),
             }),
-        }
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "runtime execution bridges durable runtime maps, workspace context, live events, and cancellation"
-    )]
-    pub(crate) async fn execute_command(
-        &self,
-        command: &CommandEnvelope,
-        runtime_seqs: &mut HashMap<String, i64>,
-        workspace_path: Option<&str>,
-        runtime_transcripts: &mut HashMap<String, Vec<ProviderTranscriptMessage>>,
-        runtime_provider_resume_refs: &mut HashMap<String, ProviderResumeRef>,
-        provider_mcp_access: Option<&ProviderMcpAccess>,
-        live_event_sink: Option<&mut NodeLiveEventSink<'_>>,
-        cancellation: Option<watch::Receiver<bool>>,
-    ) -> Vec<EventEnvelope> {
-        match self {
-            Self::Codex(provider) => {
-                provider
-                    .events_for_command(
-                        command,
-                        runtime_seqs,
-                        workspace_path,
-                        runtime_transcripts,
-                        runtime_provider_resume_refs,
-                        provider_mcp_access,
-                        live_event_sink,
-                        cancellation,
-                    )
-                    .await
-            }
-            Self::Unsupported(provider) => provider.events_for_command(command, runtime_seqs),
         }
     }
 
@@ -75,6 +41,96 @@ impl RuntimeManager {
                     provider.provider_key
                 ),
             ),
+        }
+    }
+}
+
+/// Agent-only provider boundary. Task execution deliberately does not import it.
+pub(crate) enum AgentRuntimeDriver<'a> {
+    CodexManaged(CodexManagedDriver<'a>),
+    CodexExecCompatibility(CodexExecCompatibilityDriver),
+    Unsupported(UnsupportedProviderAdapter),
+}
+
+/// Existing stateless `codex exec/resume` compatibility implementation.
+pub(crate) type CodexExecCompatibilityDriver = CodexProviderAdapter;
+
+pub(crate) struct CodexManagedDriver<'a> {
+    config: &'a NodeConfig,
+    supervisor: &'a ManagedRuntimeSupervisor,
+}
+
+impl<'a> AgentRuntimeDriver<'a> {
+    pub(crate) fn for_command(
+        provider_key: &str,
+        profile: AgentExecutionProfile,
+        config: &'a NodeConfig,
+        supervisor: Option<&'a ManagedRuntimeSupervisor>,
+    ) -> Self {
+        match (provider_key, profile, supervisor) {
+            ("codex", AgentExecutionProfile::Managed, Some(supervisor)) => {
+                Self::CodexManaged(CodexManagedDriver { config, supervisor })
+            }
+            ("codex", AgentExecutionProfile::Managed, None) => {
+                Self::Unsupported(UnsupportedProviderAdapter {
+                    provider_key: "codex.managed_supervisor_unavailable".to_owned(),
+                })
+            }
+            ("codex", AgentExecutionProfile::ExecCompatibility, _) => {
+                Self::CodexExecCompatibility(CodexProviderAdapter::new(config))
+            }
+            (other, _, _) => Self::Unsupported(UnsupportedProviderAdapter {
+                provider_key: other.to_owned(),
+            }),
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "runtime execution bridges durable runtime maps, workspace context, live events, cancellation, and attempt descriptors"
+    )]
+    pub(crate) async fn execute_command(
+        &self,
+        command: &CommandEnvelope,
+        runtime_seqs: &mut HashMap<String, i64>,
+        workspace_path: Option<&str>,
+        runtime_transcripts: &mut HashMap<String, Vec<ProviderTranscriptMessage>>,
+        runtime_provider_resume_refs: &mut HashMap<String, ProviderResumeRef>,
+        provider_mcp_access: Option<&ProviderMcpAccess>,
+        live_event_sink: Option<&mut NodeLiveEventSink<'_>>,
+        cancellation: Option<watch::Receiver<bool>>,
+        managed_attempts: &mut HashMap<String, ManagedAttemptDescriptor>,
+    ) -> Vec<EventEnvelope> {
+        match self {
+            Self::CodexManaged(driver) => {
+                driver
+                    .events_for_command(
+                        command,
+                        runtime_seqs,
+                        workspace_path,
+                        runtime_provider_resume_refs,
+                        provider_mcp_access,
+                        live_event_sink,
+                        cancellation,
+                        managed_attempts,
+                    )
+                    .await
+            }
+            Self::CodexExecCompatibility(provider) => {
+                provider
+                    .events_for_command(
+                        command,
+                        runtime_seqs,
+                        workspace_path,
+                        runtime_transcripts,
+                        runtime_provider_resume_refs,
+                        provider_mcp_access,
+                        live_event_sink,
+                        cancellation,
+                    )
+                    .await
+            }
+            Self::Unsupported(provider) => provider.events_for_command(command, runtime_seqs),
         }
     }
 }
@@ -112,6 +168,722 @@ impl ProviderStartFailure {
             message: message.into(),
         }
     }
+}
+
+impl CodexManagedDriver<'_> {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "managed execution coordinates durable sequencing, live transport, cancellation, and attempt descriptors"
+    )]
+    async fn events_for_command(
+        &self,
+        command: &CommandEnvelope,
+        runtime_seqs: &mut HashMap<String, i64>,
+        workspace_path: Option<&str>,
+        runtime_provider_resume_refs: &mut HashMap<String, ProviderResumeRef>,
+        provider_mcp_access: Option<&ProviderMcpAccess>,
+        mut live_event_sink: Option<&mut NodeLiveEventSink<'_>>,
+        cancellation: Option<watch::Receiver<bool>>,
+        managed_attempts: &mut HashMap<String, ManagedAttemptDescriptor>,
+    ) -> Vec<EventEnvelope> {
+        let Some(runtime_id) = command.target.runtime_session_id().cloned() else {
+            return vec![];
+        };
+        match command.kind {
+            CommandKind::StartRuntime | CommandKind::ResumeRuntime => {
+                self.start_or_resume(
+                    command,
+                    runtime_seqs,
+                    runtime_id,
+                    workspace_path,
+                    runtime_provider_resume_refs,
+                    provider_mcp_access,
+                    managed_attempts,
+                )
+                .await
+            }
+            CommandKind::SendTurn => {
+                let CommandPayload::SendTurn {
+                    content,
+                    turn_id,
+                    collaboration_mode,
+                } = &command.payload
+                else {
+                    return vec![runtime_error_event(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id,
+                        None,
+                        "protocol.command_payload_mismatch",
+                        "SendTurn payload does not match its command kind",
+                    )];
+                };
+                if let Some(access) = provider_mcp_access {
+                    if let Err(error) = self
+                        .supervisor
+                        .refresh_mcp_access(self.config, &runtime_id, access)
+                        .await
+                    {
+                        return vec![runtime_error_event(
+                            "codex",
+                            command,
+                            runtime_seqs,
+                            runtime_id,
+                            Some(turn_id.clone()),
+                            error.code,
+                            error.message,
+                        )];
+                    }
+                }
+                if let Some(attempt) = managed_attempts.get_mut(runtime_id.as_str()) {
+                    attempt.active_turn_id = Some(turn_id.clone());
+                }
+                match self
+                    .supervisor
+                    .send_turn(
+                        &runtime_id,
+                        content.clone(),
+                        collaboration_mode.clone(),
+                        cancellation,
+                    )
+                    .await
+                {
+                    Ok(operation) => {
+                        managed_operation_events(
+                            command,
+                            runtime_seqs,
+                            runtime_id,
+                            Some(turn_id.clone()),
+                            managed_attempts,
+                            operation,
+                            &mut live_event_sink,
+                        )
+                        .await
+                    }
+                    Err(error) => vec![runtime_error_event(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id,
+                        Some(turn_id.clone()),
+                        error.code,
+                        error.message,
+                    )],
+                }
+            }
+            CommandKind::ResolveApproval => {
+                let CommandPayload::ResolveApproval {
+                    provider_interaction_id: Some(interaction_id),
+                    approved,
+                    ..
+                } = &command.payload
+                else {
+                    return vec![runtime_error_event(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id,
+                        None,
+                        "provider.interaction_id_required",
+                        "Managed approval resolution requires a provider interaction id",
+                    )];
+                };
+                match self
+                    .supervisor
+                    .resolve_approval(&runtime_id, interaction_id, *approved)
+                    .await
+                {
+                    Ok(operation) => {
+                        managed_operation_events(
+                            command,
+                            runtime_seqs,
+                            runtime_id,
+                            None,
+                            managed_attempts,
+                            operation,
+                            &mut live_event_sink,
+                        )
+                        .await
+                    }
+                    Err(error) => vec![runtime_error_event(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id,
+                        None,
+                        error.code,
+                        error.message,
+                    )],
+                }
+            }
+            CommandKind::SubmitUserInput => {
+                let CommandPayload::SubmitUserInput {
+                    provider_interaction_id,
+                    answers,
+                } = &command.payload
+                else {
+                    unreachable!("command payload kind is validated before provider dispatch")
+                };
+                match self
+                    .supervisor
+                    .submit_input(&runtime_id, provider_interaction_id, answers)
+                    .await
+                {
+                    Ok(operation) => {
+                        managed_operation_events(
+                            command,
+                            runtime_seqs,
+                            runtime_id,
+                            None,
+                            managed_attempts,
+                            operation,
+                            &mut live_event_sink,
+                        )
+                        .await
+                    }
+                    Err(error) => vec![runtime_error_event(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id,
+                        None,
+                        error.code,
+                        error.message,
+                    )],
+                }
+            }
+            CommandKind::InterruptRuntime => {
+                if let Some(error) =
+                    validate_managed_attempt(command, &runtime_id, managed_attempts)
+                {
+                    return vec![runtime_error_event(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id,
+                        None,
+                        error.code,
+                        error.message,
+                    )];
+                }
+                match self.supervisor.interrupt(&runtime_id).await {
+                    Ok(operation) => {
+                        managed_operation_events(
+                            command,
+                            runtime_seqs,
+                            runtime_id,
+                            None,
+                            managed_attempts,
+                            operation,
+                            &mut live_event_sink,
+                        )
+                        .await
+                    }
+                    Err(error) => vec![runtime_error_event(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id,
+                        None,
+                        error.code,
+                        error.message,
+                    )],
+                }
+            }
+            CommandKind::StopRuntime => {
+                if let Some(error) =
+                    validate_managed_attempt(command, &runtime_id, managed_attempts)
+                {
+                    return vec![runtime_error_event(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id,
+                        None,
+                        error.code,
+                        error.message,
+                    )];
+                }
+                match self.supervisor.stop(&runtime_id).await {
+                    Ok(mut stopped) => {
+                        if let Some(previous) = managed_attempts.get(runtime_id.as_str()) {
+                            stopped.policy_hash = previous.policy_hash.clone();
+                            stopped.started_at = previous.started_at;
+                        }
+                        let attempt_id = stopped.runtime_attempt_id.clone();
+                        if let Some(thread_id) = stopped.provider_thread_id.clone() {
+                            runtime_provider_resume_refs.insert(
+                                runtime_id.to_string(),
+                                ProviderResumeRef {
+                                    provider_session_id: Some(thread_id),
+                                    resume_cursor: None,
+                                },
+                            );
+                        }
+                        managed_attempts.insert(runtime_id.to_string(), stopped);
+                        let reason = match &command.payload {
+                            CommandPayload::StopRuntime { reason, .. } => {
+                                reason.as_deref().unwrap_or("explicit_stop")
+                            }
+                            _ => "explicit_stop",
+                        };
+                        vec![event_for_command(
+                            "codex",
+                            command,
+                            runtime_seqs,
+                            runtime_id,
+                            None,
+                            EventKind::RuntimeStopped,
+                            serde_json::json!({
+                                "provider": "codex",
+                                "mode": "managed",
+                                "runtime_attempt_id": attempt_id,
+                                "reason": reason,
+                            }),
+                        )]
+                    }
+                    Err(error) => vec![runtime_error_event(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id,
+                        None,
+                        error.code,
+                        error.message,
+                    )],
+                }
+            }
+            _ => vec![],
+        }
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "managed start validates policy and updates durable attempt and resume projections"
+    )]
+    async fn start_or_resume(
+        &self,
+        command: &CommandEnvelope,
+        runtime_seqs: &mut HashMap<String, i64>,
+        runtime_id: RuntimeSessionId,
+        workspace_path: Option<&str>,
+        runtime_provider_resume_refs: &mut HashMap<String, ProviderResumeRef>,
+        provider_mcp_access: Option<&ProviderMcpAccess>,
+        managed_attempts: &mut HashMap<String, ManagedAttemptDescriptor>,
+    ) -> Vec<EventEnvelope> {
+        let (policy, supplied_hash) = match &command.payload {
+            CommandPayload::StartRuntime {
+                effective_policy,
+                effective_policy_hash,
+                ..
+            }
+            | CommandPayload::ResumeRuntime {
+                effective_policy,
+                effective_policy_hash,
+                ..
+            } => (effective_policy.as_ref(), effective_policy_hash.as_ref()),
+            _ => (None, None),
+        };
+        let (Some(policy), Some(supplied_hash)) = (policy, supplied_hash) else {
+            return vec![runtime_error_event(
+                "codex",
+                command,
+                runtime_seqs,
+                runtime_id,
+                None,
+                "provider.managed_policy_required",
+                "Managed Codex start requires an effective policy and hash",
+            )];
+        };
+        if policy.execution_profile != AgentExecutionProfile::Managed {
+            return vec![runtime_error_event(
+                "codex",
+                command,
+                runtime_seqs,
+                runtime_id,
+                None,
+                "provider.managed_policy_mismatch",
+                "Effective policy does not select the managed execution profile",
+            )];
+        }
+        let calculated_hash = match policy.policy_hash() {
+            Ok(hash) if &hash == supplied_hash => hash,
+            Ok(_) => {
+                return vec![runtime_error_event(
+                    "codex",
+                    command,
+                    runtime_seqs,
+                    runtime_id,
+                    None,
+                    "provider.managed_policy_hash_mismatch",
+                    "Effective managed policy hash did not match the supplied snapshot",
+                )]
+            }
+            Err(_) => {
+                return vec![runtime_error_event(
+                    "codex",
+                    command,
+                    runtime_seqs,
+                    runtime_id,
+                    None,
+                    "provider.managed_policy_invalid",
+                    "Effective managed policy could not be validated",
+                )]
+            }
+        };
+        let Some(workspace) = workspace_path else {
+            return vec![runtime_error_event(
+                "codex",
+                command,
+                runtime_seqs,
+                runtime_id,
+                None,
+                "provider.workspace_missing",
+                "Managed Codex runtime requires a workspace path",
+            )];
+        };
+        let workspace = match canonical_workspace_root_for_allowed_paths(
+            &self.config.workspace_paths,
+            workspace,
+        ) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                return vec![runtime_error_event(
+                    "codex",
+                    command,
+                    runtime_seqs,
+                    runtime_id,
+                    None,
+                    error.code,
+                    error.message,
+                )]
+            }
+        };
+        let policy_workspace = match std::fs::canonicalize(&policy.workspace_root) {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                return vec![runtime_error_event(
+                    "codex",
+                    command,
+                    runtime_seqs,
+                    runtime_id,
+                    None,
+                    "provider.managed_policy_workspace_invalid",
+                    format!("Effective policy workspace could not be canonicalized: {error}"),
+                )]
+            }
+        };
+        if workspace != policy_workspace {
+            return vec![runtime_error_event(
+                "codex",
+                command,
+                runtime_seqs,
+                runtime_id,
+                None,
+                "provider.managed_policy_workspace_mismatch",
+                "Managed command workspace does not match the immutable effective policy",
+            )];
+        }
+        let workspace = workspace.display().to_string();
+        let resume_thread_id = if command.kind == CommandKind::ResumeRuntime {
+            command_provider_resume_ref(command)
+                .or_else(|| {
+                    runtime_provider_resume_refs
+                        .get(runtime_id.as_str())
+                        .cloned()
+                })
+                .and_then(|resume_ref| resume_ref.provider_session_id)
+        } else {
+            None
+        };
+        match self
+            .supervisor
+            .start(
+                self.config,
+                &runtime_id,
+                &workspace,
+                policy,
+                &calculated_hash,
+                resume_thread_id.as_deref(),
+                provider_mcp_access,
+            )
+            .await
+        {
+            Ok(descriptor) => {
+                let attempt_id = descriptor.runtime_attempt_id.clone();
+                let provider_thread_id = descriptor.provider_thread_id.clone();
+                if let Some(thread_id) = provider_thread_id.clone() {
+                    runtime_provider_resume_refs.insert(
+                        runtime_id.to_string(),
+                        ProviderResumeRef {
+                            provider_session_id: Some(thread_id),
+                            resume_cursor: None,
+                        },
+                    );
+                }
+                managed_attempts.insert(runtime_id.to_string(), descriptor);
+                let resumed = command.kind == CommandKind::ResumeRuntime;
+                vec![
+                    event_for_command(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id.clone(),
+                        None,
+                        EventKind::RuntimeAttemptStarted,
+                        serde_json::json!({
+                            "runtime_attempt_id": attempt_id,
+                            "state": "starting",
+                            "reason": if resumed { "explicit_resume" } else { "explicit_start" },
+                        }),
+                    ),
+                    event_for_command(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id.clone(),
+                        None,
+                        EventKind::RuntimePolicyEffective,
+                        serde_json::json!({
+                            "policy": policy,
+                            "policy_hash": calculated_hash,
+                        }),
+                    ),
+                    event_for_command(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id.clone(),
+                        None,
+                        if resumed {
+                            EventKind::RuntimeAttemptRecovered
+                        } else {
+                            EventKind::RuntimeAttemptReady
+                        },
+                        serde_json::json!({
+                            "runtime_attempt_id": attempt_id,
+                            "state": if resumed { "recovered" } else { "ready" },
+                            "reason": if resumed { "provider_native_resume" } else { "handshake_completed" },
+                        }),
+                    ),
+                    event_for_command(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id,
+                        None,
+                        EventKind::RuntimeReady,
+                        serde_json::json!({
+                            "provider": "codex",
+                            "mode": "managed",
+                            "runtime_attempt_id": attempt_id,
+                            "provider_resume_ref": {
+                                "provider_session_id": provider_thread_id,
+                            }
+                        }),
+                    ),
+                ]
+            }
+            Err(error) => vec![runtime_error_event(
+                "codex",
+                command,
+                runtime_seqs,
+                runtime_id,
+                None,
+                error.code,
+                error.message,
+            )],
+        }
+    }
+}
+
+async fn managed_operation_events(
+    command: &CommandEnvelope,
+    runtime_seqs: &mut HashMap<String, i64>,
+    runtime_id: RuntimeSessionId,
+    turn_id: Option<TurnId>,
+    managed_attempts: &mut HashMap<String, ManagedAttemptDescriptor>,
+    mut operation: ManagedOperation,
+    live_event_sink: &mut Option<&mut NodeLiveEventSink<'_>>,
+) -> Vec<EventEnvelope> {
+    let attempt_id = managed_attempts
+        .get(runtime_id.as_str())
+        .map(|attempt| attempt.runtime_attempt_id.clone())
+        .unwrap_or_else(|| RuntimeAttemptId::from("attempt-unknown"));
+    let effective_turn_id = turn_id.or_else(|| {
+        managed_attempts
+            .get(runtime_id.as_str())
+            .and_then(|attempt| attempt.active_turn_id.clone())
+    });
+    let mut events = Vec::new();
+    while let Some(update) = operation.updates.recv().await {
+        let (kind, payload, update_turn_id) = match update {
+            ManagedRuntimeUpdate::TurnStarted => (
+                EventKind::TurnStarted,
+                serde_json::json!({}),
+                effective_turn_id.clone(),
+            ),
+            ManagedRuntimeUpdate::OutputDelta(content) => (
+                EventKind::ProviderOutputDelta,
+                serde_json::json!({ "content": content }),
+                effective_turn_id.clone(),
+            ),
+            ManagedRuntimeUpdate::MessageCompleted(content) => (
+                EventKind::ProviderMessageCompleted,
+                serde_json::json!({ "content": content }),
+                effective_turn_id.clone(),
+            ),
+            ManagedRuntimeUpdate::Activity {
+                method,
+                payload,
+                unknown,
+            } => (
+                EventKind::ProviderActivity,
+                serde_json::json!({
+                    "provider": "codex",
+                    "source": "app-server-v2",
+                    "provider_event_type": method,
+                    "phase": "observed",
+                    "status": if unknown { "protocol_drift" } else { "observed" },
+                    "raw_event": payload,
+                }),
+                effective_turn_id.clone(),
+            ),
+            ManagedRuntimeUpdate::InteractionRequested {
+                interaction_id,
+                kind,
+                prompt,
+            } => (
+                EventKind::ProviderInteractionRequested,
+                serde_json::json!({
+                    "provider_interaction_id": interaction_id,
+                    "runtime_attempt_id": attempt_id,
+                    "interaction_kind": kind,
+                    "prompt": prompt,
+                    "expires_at": Utc::now() + chrono::Duration::hours(24),
+                }),
+                effective_turn_id.clone(),
+            ),
+            ManagedRuntimeUpdate::InteractionResolved {
+                interaction_id,
+                kind,
+                approved,
+                answers,
+            } => (
+                EventKind::ProviderInteractionResolved,
+                serde_json::json!({
+                    "provider_interaction_id": interaction_id,
+                    "runtime_attempt_id": attempt_id,
+                    "interaction_kind": kind,
+                    "approved": approved,
+                    "answers": answers,
+                }),
+                effective_turn_id.clone(),
+            ),
+            ManagedRuntimeUpdate::TurnCompleted => (
+                EventKind::TurnCompleted,
+                serde_json::json!({}),
+                effective_turn_id.clone(),
+            ),
+            ManagedRuntimeUpdate::TurnInterrupted => (
+                EventKind::TurnInterrupted,
+                serde_json::json!({
+                    "provider": "codex",
+                    "code": "provider.interrupted",
+                    "message": "Codex managed turn was interrupted",
+                }),
+                effective_turn_id.clone(),
+            ),
+            ManagedRuntimeUpdate::Failed { code, message } => (
+                EventKind::RuntimeError,
+                serde_json::json!({ "code": code, "message": message }),
+                effective_turn_id.clone(),
+            ),
+        };
+        let event = event_for_command(
+            "codex",
+            command,
+            runtime_seqs,
+            runtime_id.clone(),
+            update_turn_id,
+            kind,
+            payload,
+        );
+        if let Some(sink) = live_event_sink.as_mut() {
+            sink.emit(&event);
+        }
+        let terminal = matches!(
+            kind,
+            EventKind::ProviderInteractionRequested
+                | EventKind::TurnCompleted
+                | EventKind::TurnInterrupted
+                | EventKind::RuntimeError
+        );
+        events.push(event);
+        if terminal {
+            if !matches!(kind, EventKind::ProviderInteractionRequested) {
+                if let Some(attempt) = managed_attempts.get_mut(runtime_id.as_str()) {
+                    attempt.active_turn_id = None;
+                    if kind == EventKind::RuntimeError {
+                        attempt.state = RuntimeAttemptState::Failed;
+                        attempt.stopped_at = Some(Utc::now());
+                        attempt.terminal_reason = Some("managed_operation_failed".to_owned());
+                    }
+                }
+            }
+            match kind {
+                EventKind::ProviderInteractionRequested => events.push(event_for_command(
+                    "codex",
+                    command,
+                    runtime_seqs,
+                    runtime_id.clone(),
+                    None,
+                    EventKind::RuntimeBlocked,
+                    serde_json::json!({
+                        "provider": "codex",
+                        "mode": "managed",
+                        "reason": "provider_interaction_requested",
+                    }),
+                )),
+                EventKind::TurnCompleted | EventKind::TurnInterrupted => {
+                    events.push(event_for_command(
+                        "codex",
+                        command,
+                        runtime_seqs,
+                        runtime_id.clone(),
+                        None,
+                        EventKind::RuntimeReady,
+                        serde_json::json!({ "provider": "codex", "mode": "managed" }),
+                    ))
+                }
+                _ => {}
+            }
+            break;
+        }
+    }
+    events
+}
+
+fn validate_managed_attempt(
+    command: &CommandEnvelope,
+    runtime_id: &RuntimeSessionId,
+    attempts: &HashMap<String, ManagedAttemptDescriptor>,
+) -> Option<ManagedRuntimeError> {
+    let requested = match &command.payload {
+        CommandPayload::InterruptRuntime { runtime_attempt_id }
+        | CommandPayload::StopRuntime {
+            runtime_attempt_id, ..
+        } => runtime_attempt_id.as_ref(),
+        _ => None,
+    }?;
+    let current = attempts.get(runtime_id.as_str())?;
+    (requested != &current.runtime_attempt_id).then(|| {
+        ManagedRuntimeError::new(
+            "provider.runtime_attempt_conflict",
+            "The command targets a stale managed runtime attempt",
+        )
+    })
 }
 
 impl CodexProviderAdapter {
@@ -194,6 +966,7 @@ impl CodexProviderAdapter {
         }
         let prompt = deduction_prompt(package);
         let mut command = TokioCommand::new(&self.codex_binary);
+        configure_provider_environment(&mut command);
         command.arg("exec");
         if self.ignore_user_config {
             command.arg("--ignore-user-config");
@@ -418,6 +1191,7 @@ impl CodexProviderAdapter {
                     approval_id,
                     approved,
                     message,
+                    ..
                 } = &command.payload
                 else {
                     return vec![runtime_error_event(
@@ -502,7 +1276,10 @@ impl CodexProviderAdapter {
         mut live_event_sink: Option<&mut NodeLiveEventSink<'_>>,
         cancellation: Option<watch::Receiver<bool>>,
     ) -> Vec<EventEnvelope> {
-        let CommandPayload::SendTurn { content, turn_id } = &command.payload else {
+        let CommandPayload::SendTurn {
+            content, turn_id, ..
+        } = &command.payload
+        else {
             return vec![runtime_error_event(
                 self.provider_key(),
                 command,
@@ -788,6 +1565,7 @@ impl CodexProviderAdapter {
         cancellation: Option<watch::Receiver<bool>>,
     ) -> Result<CodexProcessOutput, ProviderStartFailure> {
         let mut command = TokioCommand::new(&self.codex_binary);
+        configure_provider_environment(&mut command);
         configure_uprava_mcp(&mut command, provider_mcp_access)?;
         command.arg("exec");
         if self.ignore_user_config {
@@ -840,6 +1618,7 @@ impl CodexProviderAdapter {
         cancellation: Option<watch::Receiver<bool>>,
     ) -> Result<CodexProcessOutput, ProviderStartFailure> {
         let mut command = TokioCommand::new(&self.codex_binary);
+        configure_provider_environment(&mut command);
         configure_uprava_mcp(&mut command, provider_mcp_access)?;
         command.arg("exec");
         if self.ignore_user_config {
@@ -1101,15 +1880,76 @@ pub(crate) fn configure_uprava_mcp(
             "Uprava MCP endpoint could not be encoded for Codex",
         )
     })?;
+    // Codex persists shell environment snapshots between app-server launches. A stable secret
+    // variable name can therefore resolve to a previous runtime's revoked lease even though the
+    // child process received the current value. A per-process name keeps the credential ephemeral
+    // without placing its value in argv or provider configuration.
+    let token_env = format!("{UPRAVA_MCP_TOKEN_ENV_PREFIX}{}", Uuid::new_v4().simple());
     command
+        .arg("--disable")
+        .arg("shell_snapshot")
+        .arg("--config")
+        .arg("shell_environment_policy.inherit=all")
         .arg("--config")
         .arg(format!("mcp_servers.uprava.url={endpoint_literal}"))
         .arg("--config")
         .arg(format!(
-            "mcp_servers.uprava.bearer_token_env_var=\"{UPRAVA_MCP_TOKEN_ENV}\""
+            "mcp_servers.uprava.bearer_token_env_var=\"{token_env}\""
         ))
-        .env(UPRAVA_MCP_TOKEN_ENV, access.access_token.expose_secret());
+        .arg("--config")
+        .arg("mcp_servers.uprava.default_tools_approval_mode=\"approve\"")
+        .env(token_env, access.access_token.expose_secret());
     Ok(())
+}
+
+const PROVIDER_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "COMSPEC",
+    "SHELL",
+    "CODEX_SHELL",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "CODEX_HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+    "LANG",
+    "LC_ALL",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORGANIZATION",
+    "OPENAI_PROJECT",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_OPENAI_API_VERSION",
+];
+
+pub(crate) fn configure_provider_environment(command: &mut TokioCommand) {
+    let inherited = PROVIDER_ENV_ALLOWLIST
+        .iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| (*name, value)))
+        .collect::<Vec<_>>();
+    command.env_clear().envs(inherited);
 }
 
 #[cfg(unix)]

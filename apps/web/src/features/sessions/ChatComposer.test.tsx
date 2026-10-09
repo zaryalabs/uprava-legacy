@@ -14,7 +14,9 @@ describe("ChatComposer", () => {
     fireEvent.change(textarea, { target: { value: "keep this draft" } });
     fireEvent.click(screen.getByRole("button", { name: /Send/i }));
 
-    await waitFor(() => expect(onSend).toHaveBeenCalledWith("keep this draft"));
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith("keep this draft", "default"),
+    );
     expect(textarea).toHaveValue("keep this draft");
   });
 
@@ -29,5 +31,20 @@ describe("ChatComposer", () => {
     fireEvent.click(screen.getByRole("button", { name: /Send/i }));
 
     await waitFor(() => expect(textarea).toHaveValue(""));
+  });
+
+  it("submits Plan mode when a managed turn may ask questions", async () => {
+    const onSend = vi.fn(() => Promise.resolve());
+    render(<ChatComposer pending={false} supportsPlanMode onSend={onSend} />);
+
+    fireEvent.change(screen.getByLabelText("Turn collaboration mode"), {
+      target: { value: "plan" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Send a turn"), {
+      target: { value: "ask me" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Send/i }));
+
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("ask me", "plan"));
   });
 });

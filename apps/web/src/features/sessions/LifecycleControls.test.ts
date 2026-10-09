@@ -9,12 +9,12 @@ import { lifecycleControlStates } from "./LifecycleControls";
 describe("lifecycleControlStates", () => {
   it("enables lifecycle controls from session and runtime state", () => {
     expect(
-      enabledLabels(session("active", runtime("running")), [
+      enabledLabels(session("active", runtime("running", "managed")), [
         "session.detach",
         "runtime.interrupt",
         "runtime.stop",
       ]),
-    ).toEqual(["Detach", "Cancel", "Stop"]);
+    ).toEqual(["Detach", "Interrupt", "Stop"]);
     expect(
       enabledLabels(session("detached", runtime("ready")), [
         "session.attach",
@@ -37,6 +37,15 @@ describe("lifecycleControlStates", () => {
     expect(
       enabledLabels(session("stopped", runtime("stopped")), ["runtime.resume"]),
     ).toEqual(["Resume"]);
+  });
+
+  it("hides managed-only interrupt for compatibility sessions", () => {
+    expect(
+      enabledLabels(
+        session("active", runtime("running", "exec_compatibility")),
+        ["session.detach", "runtime.interrupt", "runtime.stop"],
+      ),
+    ).toEqual(["Detach", "Stop"]);
   });
 
   it("disables every lifecycle control while a lifecycle mutation is pending", () => {
@@ -70,10 +79,14 @@ function enabledLabels(
     .map((control) => control.label);
 }
 
-function runtime(state: RuntimeSummary["state"]): RuntimeSummary {
+function runtime(
+  state: RuntimeSummary["state"],
+  executionProfile: RuntimeSummary["execution_profile"] = "exec_compatibility",
+): RuntimeSummary {
   return {
     runtime_session_id: "runtime-1",
     provider: "codex",
+    execution_profile: executionProfile,
     state,
     resume_supported: true,
     degraded_reason: null,

@@ -23,6 +23,7 @@ async fn compatible_control_hello_acknowledges_and_dispatches_pending_command() 
             node_id: node_id.clone(),
             daemon_version: "0.1.0".to_owned(),
             active_runtime_ids: vec![],
+            actual_runtime_attempts: vec![],
         },
     )
     .await
@@ -43,6 +44,111 @@ async fn compatible_control_hello_acknowledges_and_dispatches_pending_command() 
         ControlFrame::CommandDispatch { command, .. }
             if command.command_id == command_id
     ));
+}
+
+#[tokio::test]
+async fn managed_actual_state_reconciles_only_the_current_attempt() {
+    let state = test_state().await;
+    let (node_id, compatibility, workspace_path) = create_test_session(&state).await;
+    let capabilities = ProviderRuntimeCapability::required_for_managed_codex()
+        .iter()
+        .map(|capability| CapabilitySummary {
+            key: capability.as_str().to_owned(),
+            value: CapabilityValue::Provider {
+                available: true,
+                configured: true,
+                mode: "managed".to_owned(),
+                timeout_seconds: None,
+                unavailable_reason: None,
+            },
+        })
+        .chain(std::iter::once(CapabilitySummary {
+            key: "provider.codex".to_owned(),
+            value: CapabilityValue::provider(true),
+        }))
+        .collect();
+    set_node_capabilities(&state, &node_id, capabilities).await;
+    let managed = create_session(
+        State(state.clone()),
+        Json(CreateSessionRequest {
+            project_placement_id: compatibility.placement.project_placement_id,
+            title: Some("Managed reconciliation".to_owned()),
+            provider: "codex".to_owned(),
+            execution_profile: Some(AgentExecutionProfile::Managed),
+            force: false,
+        }),
+    )
+    .await
+    .expect("managed session creates")
+    .0;
+    let mut started = node_event_fixture(
+        &managed,
+        node_id.clone(),
+        "reconcile-attempt-started",
+        1,
+        EventKind::RuntimeAttemptStarted,
+        json!({
+            "runtime_attempt_id": "attempt-current",
+            "state": "starting",
+            "reason": "session_start",
+        }),
+    );
+    started.turn_id = None;
+    accept_node_event(&state, started)
+        .await
+        .expect("attempt starts");
+    let policy_hash = managed
+        .session
+        .runtime
+        .effective_policy_hash
+        .clone()
+        .expect("managed policy hash exists");
+    let (sender, _receiver) = mpsc::channel(CONTROL_QUEUE_CAPACITY);
+    let context = state.control_connections.context(node_id.clone(), sender);
+    handle_node_control_frame(
+        &state,
+        &context,
+        ControlFrame::Hello {
+            frame_id: "managed-reconcile-hello".to_owned(),
+            protocol_version: API_VERSION.to_owned(),
+            sent_at: Utc::now(),
+            node_id: node_id.clone(),
+            daemon_version: "test".to_owned(),
+            active_runtime_ids: vec![managed.session.runtime.runtime_session_id.clone()],
+            actual_runtime_attempts: vec![RuntimeAttemptActualState {
+                runtime_session_id: managed.session.runtime.runtime_session_id.clone(),
+                runtime_attempt_id: RuntimeAttemptId::from("attempt-current"),
+                state: RuntimeAttemptState::Recovered,
+                effective_policy_hash: policy_hash,
+                active_turn_id: None,
+                started_at: Utc::now(),
+            }],
+        },
+    )
+    .await
+    .expect("actual state reconciles");
+    let reconciled = load_session_detail(&state, &managed.session.session_thread_id)
+        .await
+        .expect("reconciled session loads");
+
+    assert_eq!(
+        (
+            reconciled.session.runtime.recovery_status,
+            reconciled
+                .session
+                .runtime
+                .current_attempt
+                .map(|attempt| (attempt.runtime_attempt_id, attempt.state)),
+        ),
+        (
+            RuntimeRecoveryStatus::Recovered,
+            Some((
+                RuntimeAttemptId::from("attempt-current"),
+                RuntimeAttemptState::Recovered,
+            )),
+        )
+    );
+    std::fs::remove_dir_all(&workspace_path).expect("workspace dir removes");
 }
 
 #[tokio::test]
@@ -86,6 +192,7 @@ async fn overlapping_control_connections_keep_newest_generation_active() {
             node_id: old_context.node_id.clone(),
             daemon_version: "test".to_owned(),
             active_runtime_ids: vec![],
+            actual_runtime_attempts: vec![],
         },
     )
     .await;
@@ -510,6 +617,7 @@ async fn incompatible_control_hello_sends_error_and_leaves_command_pending() {
             node_id: node_id.clone(),
             daemon_version: "0.1.0".to_owned(),
             active_runtime_ids: vec![],
+            actual_runtime_attempts: vec![],
         },
     )
     .await

@@ -192,6 +192,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             put(update_plugin_contribution_preferences_route),
         )
         .route("/references/resolve", post(resolve_reference_route))
+        .route("/sessions/policy-preview", post(preview_session_policy_route))
         .route("/sessions/{session_thread_id}/stream", get(session_stream))
         .route(
             "/sessions/{session_thread_id}/evidence-projection",
@@ -238,6 +239,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/sessions/{session_thread_id}/approvals/{approval_id}/resolve",
             post(resolve_approval_route),
+        )
+        .route(
+            "/sessions/{session_thread_id}/provider-interactions/{provider_interaction_id}/input",
+            post(submit_provider_input_route),
+        )
+        .route(
+            "/sessions/{session_thread_id}/provider-interactions/{provider_interaction_id}/approval",
+            post(resolve_provider_approval_route),
         )
         .route(
             "/sessions/{session_thread_id}/warnings/{warning_kind}/acknowledge",
@@ -463,16 +472,73 @@ pub(crate) async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResp
     .fetch_one(&state.pool)
     .await
     .unwrap_or(0);
+    let runtime_states: Vec<(String, String, String, i64)> = sqlx::query_as(
+        "select provider, execution_profile, recovery_status, count(*) from runtime_sessions group by provider, execution_profile, recovery_status",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+    let interaction_states: Vec<(String, String, String, i64)> = sqlx::query_as(
+        r#"
+        select r.provider, r.execution_profile, i.state, count(*)
+        from provider_interactions i
+        join runtime_sessions r on r.runtime_session_id = i.runtime_session_id
+        group by r.provider, r.execution_profile, i.state
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+    let mut managed_metrics = String::from(
+        "# HELP uprava_core_managed_runtime_states Managed runtime sessions by bounded provider/profile/recovery state.\n# TYPE uprava_core_managed_runtime_states gauge\n",
+    );
+    for (provider, profile, recovery, count) in runtime_states {
+        managed_metrics.push_str(&format!(
+            "uprava_core_managed_runtime_states{{provider=\"{}\",profile=\"{}\",state=\"{}\"}} {}\n",
+            prometheus_label(&provider),
+            prometheus_label(&profile),
+            prometheus_label(&recovery),
+            count,
+        ));
+    }
+    managed_metrics.push_str(
+        "# HELP uprava_core_provider_interactions Provider interactions by bounded provider/profile/state.\n# TYPE uprava_core_provider_interactions gauge\n",
+    );
+    for (provider, profile, interaction_state, count) in interaction_states {
+        managed_metrics.push_str(&format!(
+            "uprava_core_provider_interactions{{provider=\"{}\",profile=\"{}\",state=\"{}\"}} {}\n",
+            prometheus_label(&provider),
+            prometheus_label(&profile),
+            prometheus_label(&interaction_state),
+            count,
+        ));
+    }
     let body = format!(
-        "{}# HELP uprava_core_event_publication_outbox_pending Pending event publications.\n# TYPE uprava_core_event_publication_outbox_pending gauge\nuprava_core_event_publication_outbox_pending {}\n",
+        "{}# HELP uprava_core_event_publication_outbox_pending Pending event publications.\n# TYPE uprava_core_event_publication_outbox_pending gauge\nuprava_core_event_publication_outbox_pending {}\n{}",
         state.core_metrics.render(),
-        pending_outbox
+        pending_outbox,
+        managed_metrics,
     );
     (
         StatusCode::OK,
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
         body,
     )
+}
+
+fn prometheus_label(value: &str) -> String {
+    value
+        .chars()
+        .take(100)
+        .fold(String::new(), |mut escaped, character| {
+            match character {
+                '\\' => escaped.push_str("\\\\"),
+                '"' => escaped.push_str("\\\""),
+                '\n' | '\r' => escaped.push(' '),
+                other => escaped.push(other),
+            }
+            escaped
+        })
 }
 
 pub(crate) async fn version(State(state): State<Arc<AppState>>) -> Json<VersionResponse> {

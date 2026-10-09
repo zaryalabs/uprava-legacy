@@ -81,9 +81,16 @@ describe("App routes", () => {
       "/workspaces/placement-1/workbench",
     );
     expect(await screen.findByRole("heading", { name: "Agent" })).toBeVisible();
-    expect(
-      await screen.findByRole("button", { name: "Start Codex" }),
-    ).toBeEnabled();
+    const startCompatibility = await screen.findByRole("button", {
+      name: "Start Exec compatibility",
+    });
+    expect(startCompatibility).toBeDisabled();
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: /I understand this mode is unrestricted/,
+      }),
+    );
+    expect(startCompatibility).toBeEnabled();
     const selectedSession = screen.getByRole("link", { name: /Fix issue/ });
     expect(selectedSession).toHaveAttribute("aria-current", "page");
     expect(
@@ -334,8 +341,15 @@ describe("App routes", () => {
     const forceStart = screen.getByRole("checkbox", {
       name: "Force start at 5% or less provider quota",
     });
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: /I understand this mode is unrestricted/,
+      }),
+    );
     fireEvent.click(forceStart);
-    fireEvent.click(screen.getByRole("button", { name: "Start Codex" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Start Exec compatibility" }),
+    );
 
     expect(
       await screen.findByRole("heading", { name: "Started session" }),
@@ -352,6 +366,7 @@ describe("App routes", () => {
     expect(lastCreateSessionRequest).toEqual({
       project_placement_id: "placement-2",
       provider: "codex",
+      execution_profile: "exec_compatibility",
       force: true,
     });
   });
@@ -555,6 +570,40 @@ async function mockFetch(input: RequestInfo | URL, init?: RequestInit) {
     return jsonResponse(
       protocolFixtures.plugin_contract.effective_snapshot.resolutions[0],
     );
+  }
+  if (
+    url.pathname === "/api/v1/sessions/policy-preview" &&
+    init?.method === "POST"
+  ) {
+    const request = JSON.parse(String(init.body)) as {
+      project_placement_id: string;
+      execution_profile: "managed" | "exec_compatibility";
+    };
+    return jsonResponse({
+      project_placement_id: request.project_placement_id,
+      node_id: "node-1",
+      effective_policy: {
+        contract_version: 1,
+        execution_profile: request.execution_profile,
+        provider: "codex",
+        provider_version: "0.144.1",
+        provider_capabilities: ["provider.codex.exec"],
+        sandbox_mode: "danger-full-access",
+        approval_mode: "never",
+        workspace_root: "/workspace",
+        additional_writable_paths: [],
+        network_posture: "provider_default",
+        tool_exposure: { server_count: 0, tool_count: 0, server_names: [] },
+        credential_profile_ref: null,
+        unsafe_override: {
+          actor: { kind: "local_user" },
+          reason: "exec_compatibility",
+          expires_at: "2026-07-23T00:00:00Z",
+        },
+        capability_metadata: {},
+      },
+      effective_policy_hash: "exec-policy-hash",
+    });
   }
   if (url.pathname === "/api/v1/sessions" && init?.method === "POST") {
     lastCreateSessionRequest = JSON.parse(String(init.body));

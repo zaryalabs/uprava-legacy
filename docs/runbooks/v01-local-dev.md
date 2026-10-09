@@ -416,13 +416,11 @@ provider codes:
 `provider.empty_output`.
 
 This is the accepted V01 Codex protocol after the local CLI spike: exec-mode
-adapter, not the final provider-native persistent runtime. `ResumeRuntime` can
-return to `ready` by restoring a persisted provider resume ref or, when no
-provider resume ref exists, by using bounded node-local transcript context for
-future turns. Persistent interactive ownership, live streaming and real
-interrupt escalation are post-V01 work.
-`StopRuntime` marks runtime stopped; `InterruptRuntime` currently reports an
-explicit unsupported provider error for Codex exec mode.
+adapter, not the final provider-native managed runtime. Пункт
+[`16 Managed Agent Work Loop`](../product/feature-queue.md#16-managed-agent-work-loop)
+закрыт baseline `0.2.25` и hardened baseline `0.2.26`: новые Agent sessions используют provider-native
+Managed mode на capable Node. `codex exec/resume` сохранён как явный
+unrestricted compatibility mode; настоящий Interrupt доступен только Managed.
 
 When the host has an authenticated Codex CLI, run the host Codex smoke:
 
@@ -432,15 +430,18 @@ make codex-smoke
 
 This starts a disposable Core on `127.0.0.1:18080`, Web on
 `127.0.0.1:15173`, and a host Node with a temporary git workspace under
-`/private/tmp`. It creates a `provider: "codex"` session through Core, sends a
-single constrained turn through the Node adapter, and verifies the resulting
-session in the Web Control Panel with Playwright. Override
+`/private/tmp`. It verifies the Managed API default and safe policy,
+approve/deny/input, interrupt and MCP, performs two turns around detach/attach
+and stop/resume, reloads the Web projection, and then verifies a separate
+explicit Exec compatibility turn. Override
 `CODEX_SMOKE_CORE_PORT`, `CODEX_SMOKE_WEB_PORT`, `CODEX_SMOKE_STATE_DIR`,
 `CODEX_SMOKE_WORKSPACE_PATH`, `CODEX_SMOKE_CODEX_BINARY`,
 `CODEX_SMOKE_TURN_CONTENT`, `CODEX_SMOKE_EXPECTED_ASSISTANT_CONTENT` or
 `CODEX_SMOKE_CODEX_TIMEOUT_SECONDS` for a non-default host profile. The script
 uses real Codex CLI auth/state and model access; keep it separate from
 deterministic `make c` and Compose smoke checks.
+Полная recovery/interaction checklist находится в
+[`managed-agent-runtime.md`](managed-agent-runtime.md).
 
 Core deduplicates replayed events by `event_id`. A conflicting `seq` is
 rejected, and a detected sequence gap marks the session degraded and the
@@ -453,8 +454,9 @@ Runtime-scoped events update `last_runtime_step_at`; healthy runtime events
 such as `runtime.ready` clear degraded runtime/session read-model state.
 Core expires ready, running, blocked or stale runtimes after
 `UPRAVA_RUNTIME_EXPIRY_SECONDS` without runtime activity by recording a
-system-authored `runtime.expired` event. Expired runtimes reject new turns but
-remain resumable when the provider adapter supports resume.
+system-authored `runtime.expired` event and a Node `StopRuntime` command. The
+provider process is terminated, MCP leases are revoked, and resume is accepted
+only after stop confirmation.
 The session SSE endpoint sends persisted historical events first and then keeps
 the connection open for future accepted events through Core's in-process event
 bus. If the stream falls behind the bounded bus, Core emits a `uprava.reload`
@@ -508,17 +510,16 @@ workspace/session flow, warning/degraded states and inspector actions, then
 collect `make dev-logs` output if a defect needs debugging.
 
 `make codex-smoke` starts host Core/Web/Node with a disposable writable
-workspace and runs the real Codex provider path. Run it only where Codex CLI is
-installed and authenticated.
+workspace and runs Managed interactions/MCP/lifecycle plus the explicit Exec
+compatibility path.
+Run it only where Codex CLI is installed and authenticated.
 
 ## Known Limits
 
-- Control-channel event outbox persistence covers Node-generated minimal Codex
-  exec-mode events. Codex continuity uses a bounded node-local transcript when
-  no provider session id is known, and uses
-  `codex exec resume` when a provider session id is available. Full reconnect
-  integration coverage and provider resume edge-case repair are still
-  incomplete.
+- Managed app-server transport не обещает lossless replay provider activity
+  при gap во время active turn; такой gap становится typed degraded recovery.
+  Exec compatibility continuity остаётся bounded reconstruction/resume path и
+  не используется как автоматический recovery Managed session.
 - Warning acknowledgements are scoped by session and warning kind; future
   resource-specific acknowledgement expiry is not implemented yet.
 - Node enrollment credentials are development credentials only; this remains a
@@ -529,7 +530,7 @@ installed and authenticated.
 - Workspace command execution is no-shell and limited to controlled-dev
   allow-list `cargo`, `git`, `make`, `node`, `npm`, `pnpm`, `bun` and `rustc`;
   другие executables отклоняются Node policy.
-- Codex provider adapter is the V01 exec/resume mode with bounded local
-  transcript continuity plus provider-native non-interactive resume when a
-  provider session id is available. Persistent interactive process ownership,
-  streaming output and real interrupt escalation are post-V01 work.
+- Exec compatibility remains the V01 `codex exec/resume` adapter. Managed owns
+  a persistent app-server process per attempt with streaming, typed
+  interactions and bounded interrupt escalation; the two profiles never
+  replace one another silently.

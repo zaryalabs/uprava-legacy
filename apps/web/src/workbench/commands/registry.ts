@@ -18,6 +18,7 @@ import {
 import { coreApi } from "../../shared/api/http-client";
 import type {
   ActionCapability,
+  AgentExecutionProfile,
   UpravaRef,
   CreatePlacementRequest,
   ProjectPlacementSummary,
@@ -43,6 +44,8 @@ export type WorkbenchCommandId =
   | "runtime.stop"
   | "runtime.resume"
   | "approval.resolve"
+  | "providerInteraction.resolveApproval"
+  | "providerInteraction.submitInput"
   | "warning.acknowledge"
   | "reference.openInInspector"
   | "reference.copy";
@@ -54,12 +57,17 @@ export type WorkbenchCommandContext = {
   placement?: ProjectPlacementSummary;
   placementRequest?: CreatePlacementRequest;
   provider?: string;
+  executionProfile?: AgentExecutionProfile;
   force?: boolean;
   session?: SessionSummary;
   runtime?: RuntimeSummary;
   turnContent?: string;
+  turnCollaborationMode?: "default" | "plan";
   approvalId?: string;
   approved?: boolean;
+  providerInteractionId?: string;
+  interactionMessage?: string;
+  answers?: string[];
   warningKind?: string;
   reference?: UpravaRef;
   afterSuccess?: () => Promise<void> | void;
@@ -209,6 +217,10 @@ const commands: UiCommand[] = [
           context.provider,
           "session.start requires provider",
         ),
+        execution_profile: requireValue(
+          context.executionProfile,
+          "session.start requires executionProfile",
+        ),
         force: context.force ?? false,
       });
       await context.afterSuccess?.();
@@ -271,7 +283,10 @@ const commands: UiCommand[] = [
       );
       return finishCommand(
         context,
-        coreApi.sendTurn(session.session_thread_id, { content }),
+        coreApi.sendTurn(session.session_thread_id, {
+          content,
+          collaboration_mode: context.turnCollaborationMode,
+        }),
       );
     },
   },
@@ -349,6 +364,69 @@ const commands: UiCommand[] = [
         coreApi.resolveApproval(session.session_thread_id, approvalId, {
           approved,
           message: approved ? "Approved" : "Denied",
+        }),
+      );
+    },
+  },
+  {
+    id: "providerInteraction.resolveApproval",
+    title: "Resolve provider approval",
+    icon: Check,
+    when: (context) =>
+      hasAction(context, "approval.resolve") &&
+      Boolean(context.providerInteractionId) &&
+      typeof context.approved === "boolean",
+    run: async (context) => {
+      const session = requireValue(
+        context.session,
+        "providerInteraction.resolveApproval requires session",
+      );
+      const interactionId = requireValue(
+        context.providerInteractionId,
+        "providerInteraction.resolveApproval requires providerInteractionId",
+      );
+      const approved = requireValue(
+        context.approved,
+        "providerInteraction.resolveApproval requires approved",
+      );
+      return finishCommand(
+        context,
+        coreApi.resolveProviderApproval(
+          session.session_thread_id,
+          interactionId,
+          {
+            approved,
+            message: context.interactionMessage?.trim() || null,
+          },
+        ),
+      );
+    },
+  },
+  {
+    id: "providerInteraction.submitInput",
+    title: "Submit provider input",
+    icon: Send,
+    when: (context) =>
+      hasAction(context, "providerInteraction.submitInput") &&
+      Boolean(context.providerInteractionId) &&
+      Boolean(context.answers?.some((answer) => answer.trim())),
+    run: async (context) => {
+      const session = requireValue(
+        context.session,
+        "providerInteraction.submitInput requires session",
+      );
+      const interactionId = requireValue(
+        context.providerInteractionId,
+        "providerInteraction.submitInput requires providerInteractionId",
+      );
+      const answers = requireValue(
+        context.answers,
+        "providerInteraction.submitInput requires answers",
+      ).map((answer) => answer.trim());
+      return finishCommand(
+        context,
+        coreApi.submitProviderInput(session.session_thread_id, interactionId, {
+          answers,
         }),
       );
     },

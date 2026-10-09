@@ -100,7 +100,8 @@ versioned adapter и собственную domain model. Отличие в то
 - один container на один bounded `TaskRun`;
 - host-side git worktree/branch, bind-mounted как `/workspace`;
 - custom Codex runtime image с pinned CLI and utilities;
-- запуск `codex exec --json` через execution API;
+- запуск `codex exec --json` с
+  `--dangerously-bypass-approvals-and-sandbox` через execution API;
 - streaming stdout/stderr/status в Node с преобразованием в Uprava events;
 - interrupt/cancel, hard timeout, TTL cleanup and explicit delete;
 - optional CPU/memory limits;
@@ -108,6 +109,13 @@ versioned adapter и собственную domain model. Отличие в то
 - result package: summary, commit/diff, checks, artifacts and unresolved risks;
 - persistent Codex credential profiles с однократной авторизацией — отложено
   после runtime mechanics baseline.
+
+Dangerous bypass здесь является частью принятого Task contract, а не fallback
+из Agent mode. Codex работает unrestricted внутри externally sandboxed
+environment; реальную границу задают отдельный worktree, OpenSandbox container,
+mounts, credentials, network policy, resource limits, timeout and TTL. Task
+trace/evidence должен отдельно показывать provider policy и внешний sandbox,
+чтобы unrestricted provider не путался с отсутствием общей изоляции run.
 
 ### Не входит
 

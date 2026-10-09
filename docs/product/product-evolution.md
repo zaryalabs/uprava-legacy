@@ -41,6 +41,11 @@ Persistent Runtime + Node Daemon + Core UI
 превращают agent chat в distributed control surface.
 ```
 
+Поставленный V01 adapter приблизил этот contract через долговечный
+`SessionThread` и отдельные `codex exec/resume` processes. Целевая живая форма
+с provider-native streaming, approvals, interruption and reconnect вынесена в
+`16 Managed Agent Work Loop`; exec/resume сохраняется как compatibility mode.
+
 ## Дальше
 
 Дальнейшее развитие не фиксируется как линейная цепочка стадий. Вместо этого
@@ -59,7 +64,7 @@ Persistent Runtime + Node Daemon + Core UI
 - visual artifact system;
 - dynamic UI from agents;
 - task-based sandbox runtime;
-- hybrid managed sessions;
+- Managed Agent Work Loop;
 - team/cloud model;
 - expansion beyond software development.
 
