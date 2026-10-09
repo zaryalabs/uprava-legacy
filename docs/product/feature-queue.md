@@ -1,6 +1,10 @@
 # Uprava Feature Queue
 
-Статус: `active`
+Статус: `historical`
+
+Итерация закрыта на baseline `0.2.26`. Эта очередь сохраняет историю реализации
+и прежние направления. Новый scope и порядок работы определяются через
+[ретроспективу](../retrospective/iteration-01/README.md) и её рекомендации.
 
 Этот документ использует implementation queue вместо phase-based roadmap.
 
